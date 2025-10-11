@@ -372,6 +372,48 @@ public class PartialSummaryHandlerTestCase {
         assertEquals(2, result.hits().getFilled().size());
     }
 
+    @Test
+    void testFillCanBeIgnoredWhenSummaryClassIsFilled() {
+        var summaryClass = "default";
+        var query = createQuery(summaryClass);
+        var hit1 = createHit(query);
+        var result = createResult(query, hit1);
+        hit1.setFilled(summaryClass);
+        assertTrue(PartialSummaryHandler.canIgnoreFill(summaryClass, result));
+    }
+
+    @Test
+    void testCanIgnoreFillWhenEnoughFieldsAreFilled() {
+        String summaryClass = null;
+        var query = createQuery(summaryClass);
+        query.getPresentation().setSummaryFields("field1");
+        var hit1 = createHit(query);
+        hit1.setFilled("[f:field1]");
+        var result = createResult(query, hit1);
+        assertTrue(PartialSummaryHandler.canIgnoreFill(summaryClass, result));
+    }
+
+    @Test
+    void testCanIgnoreFillWhenOnlyMatchfeaturesAreNeeded() {
+        String summaryClass = null;
+        var query = createQuery(summaryClass);
+        query.getPresentation().setSummaryFields("matchfeatures");
+        var hit1 = createHit(query);
+        hit1.setFilled("[f:matchfeatures]");
+        var result = createResult(query, hit1);
+        assertTrue(PartialSummaryHandler.canIgnoreFill(PartialSummaryHandler.PRESENTATION, result));
+    }
+
+    @Test
+    void testShouldFillWhenSummaryIsNotYetFilled() {
+        String summaryClass = null;
+        var query = createQuery(summaryClass);
+        query.getPresentation().setSummaryFields("field1");
+        var hit1 = createHit(query);
+        var result = createResult(query, hit1);
+        assertFalse(PartialSummaryHandler.canIgnoreFill(PartialSummaryHandler.PRESENTATION, result));
+    }
+
     static Query createQuery(String summaryClass) {
         if (summaryClass == null)
             return new Query("/search/?query=foo");

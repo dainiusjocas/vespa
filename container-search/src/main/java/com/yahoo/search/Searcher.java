@@ -159,9 +159,8 @@ public abstract class Searcher extends Processor {
         if (summaryClass == null)
             summaryClass = PartialSummaryHandler.resolveSummaryClass(result);
 
-        String alsoCheck = PartialSummaryHandler.enoughFields(summaryClass, result);
         var hasFilled = result.hits().getFilled();
-        if (hasFilled == null || hasFilled.contains(summaryClass) || hasFilled.contains(alsoCheck)) {
+        if (PartialSummaryHandler.canIgnoreFill(summaryClass, result)) {
             int fillRejectTraceAt = 3;
             if (result.getQuery().getTrace().getLevel() >= fillRejectTraceAt)
                 result.getQuery().trace("Ignoring fill(" + summaryClass + "): " +

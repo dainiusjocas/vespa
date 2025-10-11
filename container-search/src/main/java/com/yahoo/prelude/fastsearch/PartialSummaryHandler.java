@@ -9,15 +9,12 @@ import com.yahoo.search.Query;
 import com.yahoo.search.Result;
 import com.yahoo.search.result.Hit;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -38,6 +35,7 @@ public class PartialSummaryHandler {
     public static final String DEFAULT_CLASS = "default";
     public static final String ALL_FIELDS_CLASS = "default"; // not really true, but best we can do for now
     public static final String PRESENTATION = "[presentation]";
+    public static final Set<String> ONLY_MATCHFEATURES = Set.of("matchfeatures");
 
     private static final Logger log = Logger.getLogger(PartialSummaryHandler.class.getName());
 
@@ -247,6 +245,34 @@ public class PartialSummaryHandler {
             // this is 'always' enough:
             return ALL_FIELDS_CLASS;
         }
+    }
+
+    /**
+     * Fill can be ignored when:
+     * 1. Unfillable
+     * 2. A summary class has already been filled
+     * 3. Enough fields have already been filled
+     * 4. Match features already filled and the summary class is [presentation]
+     *    and in the summary fields we have only matchfeatures
+     * @param summaryClass
+     * @param result
+     * @return
+     */
+    public static boolean canIgnoreFill(String summaryClass, Result result) {
+        var hasFilled = result.hits().getFilled();
+        boolean unfillable = hasFilled == null;
+        if (unfillable) return true;
+
+        if (hasFilled.contains(summaryClass)) return true;
+
+        String alsoCheck = enoughFields(summaryClass, result);
+        if (hasFilled.contains(alsoCheck)) return true;
+
+        Set<String> summaryFields = result.getQuery().getPresentation().getSummaryFields();
+        boolean matchFeaturesAlreadyFilled = hasFilled.contains("[f:matchfeatures]");
+        boolean onlyMatchFeaturesInSummaryFields = summaryFields.equals(ONLY_MATCHFEATURES);
+        boolean presentationSummaryClassIsNeeded = PartialSummaryHandler.PRESENTATION.equals(summaryClass);
+        return matchFeaturesAlreadyFilled && onlyMatchFeaturesInSummaryFields && presentationSummaryClassIsNeeded;
     }
 
     public void validateSummaryClass(String summaryClass, Query query) {
