@@ -373,6 +373,14 @@ public class PartialSummaryHandlerTestCase {
     }
 
     @Test
+    void testFillCanBeIgnoredWhenUnfillable() {
+        var summaryClass = "default";
+        var query = createQuery(summaryClass);
+        var result = createResult(query);
+        assertTrue(PartialSummaryHandler.canIgnoreFill(summaryClass, result));
+    }
+
+    @Test
     void testFillCanBeIgnoredWhenSummaryClassIsFilled() {
         var summaryClass = "default";
         var query = createQuery(summaryClass);
