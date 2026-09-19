@@ -2,9 +2,32 @@
 
 #pragma once
 
+#include <vespa/eval/eval/function.h>
+#include <vespa/eval/eval/node_types.h>
 #include <vespa/eval/eval/tensor_function.h>
 
 namespace vespalib::eval {
+
+/**
+ * Result of matching a tensor-generating lambda against the
+ * 'unpack_bits' expression shape (see UnpackBitsFunction below).
+ **/
+struct UnpackBitsMatch {
+    const bool       is_unpack_bits;
+    const bool       is_big_bitorder;
+    const ValueType& src_type;
+};
+
+/**
+ * Checks whether a tensor-generating lambda (as found inside a
+ * Lambda or MapSubspaces tensor function node) has the shape of an
+ * 'unpack_bits' expression, as documented on UnpackBitsFunction
+ * below. Used both by UnpackBitsFunction::optimize and by other
+ * optimizers wanting to recognize (and fuse) the same pattern
+ * before it has been rewritten into an UnpackBitsFunction node.
+ **/
+UnpackBitsMatch detect_unpack_bits(const ValueType& dst_type, size_t num_bindings, const Function& lambda,
+                                   const NodeTypes& types);
 
 /**
  * Tensor function unpacking bits into separate values.

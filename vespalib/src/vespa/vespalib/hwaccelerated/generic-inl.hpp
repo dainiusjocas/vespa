@@ -112,6 +112,36 @@ float my_dot_product_f32(const float* a, const float* b, size_t sz) noexcept {
 double my_dot_product_f64(const double* a, const double* b, size_t sz) noexcept {
     return cblas_ddot(sz, a, 1, b, 1);
 }
+template <typename T> double bit_dot_product_scalar(const T* lhs, const int8_t* packed_bits, size_t n_bits,
+                                                    bool big_bitorder) noexcept {
+    // n_bits is always a multiple of 8; each byte of packed_bits contributes
+    // exactly 8 lanes of lhs, each lane implicitly either 0 or 1.
+    double sum = 0.0;
+    size_t idx = 0;
+    for (size_t byte_idx = 0; byte_idx < (n_bits / 8); ++byte_idx) {
+        auto byte = static_cast<uint8_t>(packed_bits[byte_idx]);
+        if (big_bitorder) {
+            for (int n = 7; n >= 0; --n) {
+                sum += ((byte >> n) & 1) ? lhs[idx] : T(0);
+                ++idx;
+            }
+        } else {
+            for (int n = 0; n <= 7; ++n) {
+                sum += ((byte >> n) & 1) ? lhs[idx] : T(0);
+                ++idx;
+            }
+        }
+    }
+    return sum;
+}
+double my_bit_dot_product_f32(const float* lhs, const int8_t* packed_bits, size_t n_bits,
+                              bool big_bitorder) noexcept {
+    return bit_dot_product_scalar(lhs, packed_bits, n_bits, big_bitorder);
+}
+double my_bit_dot_product_f64(const double* lhs, const int8_t* packed_bits, size_t n_bits,
+                              bool big_bitorder) noexcept {
+    return bit_dot_product_scalar(lhs, packed_bits, n_bits, big_bitorder);
+}
 double my_squared_euclidean_distance_i8(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return helper::squaredEuclideanDistance(a, b, sz);
 }

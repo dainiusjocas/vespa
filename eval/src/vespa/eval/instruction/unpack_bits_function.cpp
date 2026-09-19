@@ -130,16 +130,12 @@ bool is_byte_peek(const TensorPeek& peek, size_t dim_cnt) {
     return false;
 }
 
+} // namespace
+
 //-----------------------------------------------------------------------------
 
-struct Result {
-    const bool       is_unpack_bits;
-    const bool       is_big_bitorder;
-    const ValueType& src_type;
-};
-
-Result detect_unpack_bits(const ValueType& dst_type, size_t num_bindings, const Function& lambda,
-                          const NodeTypes& types) {
+UnpackBitsMatch detect_unpack_bits(const ValueType& dst_type, size_t num_bindings, const Function& lambda,
+                                   const NodeTypes& types) {
     size_t dim_cnt = dst_type.count_indexed_dimensions();
     if ((num_bindings == 1) && (lambda.num_params() == (dim_cnt + 1))) {
         if (auto bit = as<Bit>(lambda.root())) {
@@ -159,7 +155,7 @@ Result detect_unpack_bits(const ValueType& dst_type, size_t num_bindings, const 
     return {false, false, dst_type};
 }
 
-} // namespace
+//-----------------------------------------------------------------------------
 
 UnpackBitsFunction::UnpackBitsFunction(const ValueType& res_type_in, const TensorFunction& packed, bool big_bitorder)
     : Op1(res_type_in, packed), _big_bitorder(big_bitorder) {

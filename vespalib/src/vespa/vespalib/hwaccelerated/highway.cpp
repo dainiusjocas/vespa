@@ -112,6 +112,56 @@ float my_hwy_dot_bf16(const BFloat16* HWY_RESTRICT a, const BFloat16* HWY_RESTRI
     return MyKernel::pairwise(dbf16, df32, a_bf16, b_bf16, sz, hn::Zero(df32), kernel_fn, VecAdd(), LaneReduceSum());
 }
 
+// Dot product of `lhs` (n_bits lanes) against a bit-packed int8 array of
+// n_bits/8 bytes, where each unpacked lane is implicitly 0 or 1 (as if it
+// had been produced by the ranking expression 'unpack_bits' function).
+// The bits themselves are always tested with plain scalar code (this is
+// cheap: at most 8 bit tests per vector chunk), but the resulting 0/1
+// selection is applied to `lhs` and accumulated using vector multiply-add,
+// which is what dominates cost for realistic (embedding-sized) vectors.
+// Deliberately avoids any vector-width-vs-byte-boundary assumptions (e.g.
+// hardware mask-from-bits loads), since `Lanes(d)` is not guaranteed to be
+// a multiple of 8 on every target.
+template <typename T>
+    requires(hwy::IsFloat<T>())
+HWY_INLINE double my_hwy_bit_dot_product(const T* HWY_RESTRICT lhs, const int8_t* HWY_RESTRICT packed_bits,
+                                         const size_t n_bits, const bool big_bitorder) noexcept {
+    const hn::ScalableTag<T> d;
+    const size_t             lanes = hn::Lanes(d);
+    // Generous static upper bound on any realistic hardware vector lane
+    // count for a floating point type (e.g. 2048-bit SVE holds 64 f32
+    // lanes). Guarded unconditionally (not just via assert()) below, since
+    // this must never allow a stack buffer overrun even in a release
+    // (NDEBUG) build: if the bound is ever exceeded, the vectorized loop
+    // is simply skipped and everything falls through to the scalar path.
+    constexpr size_t max_lanes = 256;
+
+    auto extract_bit = [big_bitorder, packed_bits](size_t bit_idx) noexcept -> T {
+        uint8_t byte = static_cast<uint8_t>(packed_bits[bit_idx / 8]);
+        int     bit_in_byte = big_bitorder ? (7 - static_cast<int>(bit_idx % 8)) : static_cast<int>(bit_idx % 8);
+        return ((byte >> bit_in_byte) & 1) ? T(1) : T(0);
+    };
+
+    T      selected[max_lanes];
+    auto   accu = hn::Zero(d);
+    size_t idx = 0;
+    if (lanes <= max_lanes) {
+        for (; idx + lanes <= n_bits; idx += lanes) {
+            for (size_t j = 0; j < lanes; ++j) {
+                selected[j] = extract_bit(idx + j);
+            }
+            const auto sel_vec = hn::LoadU(d, selected);
+            const auto lhs_vec = hn::LoadU(d, lhs + idx);
+            accu = hn::MulAdd(sel_vec, lhs_vec, accu);
+        }
+    }
+    double sum = static_cast<double>(hn::ReduceSum(d, accu));
+    for (; idx < n_bits; ++idx) {
+        sum += static_cast<double>(lhs[idx]) * static_cast<double>(extract_bit(idx));
+    }
+    return sum;
+}
+
 template <typename T>
     requires(hwy::IsFloat<T>())
 HWY_INLINE double my_hwy_squared_euclidean_distance(const T* HWY_RESTRICT a, const T* HWY_RESTRICT b,
@@ -300,6 +350,14 @@ float my_dot_product_f32(const float* a, const float* b, size_t sz) noexcept {
 double my_dot_product_f64(const double* a, const double* b, size_t sz) noexcept {
     return my_hwy_dot_double(a, b, sz);
 }
+double my_bit_dot_product_f32(const float* lhs, const int8_t* packed_bits, size_t n_bits,
+                              bool big_bitorder) noexcept {
+    return my_hwy_bit_dot_product(lhs, packed_bits, n_bits, big_bitorder);
+}
+double my_bit_dot_product_f64(const double* lhs, const int8_t* packed_bits, size_t n_bits,
+                              bool big_bitorder) noexcept {
+    return my_hwy_bit_dot_product(lhs, packed_bits, n_bits, big_bitorder);
+}
 double my_squared_euclidean_distance_i8(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return my_hwy_square_euclidean_distance_int8(a, b, sz);
 }
@@ -340,6 +398,8 @@ public:
         ft.dot_product_bf16 = my_dot_product_bf16;
         ft.dot_product_f32 = my_dot_product_f32;
         ft.dot_product_f64 = my_dot_product_f64;
+        ft.bit_dot_product_f32 = my_bit_dot_product_f32;
+        ft.bit_dot_product_f64 = my_bit_dot_product_f64;
         ft.squared_euclidean_distance_i8 = my_squared_euclidean_distance_i8;
         ft.squared_euclidean_distance_bf16 = my_squared_euclidean_distance_bf16;
         ft.squared_euclidean_distance_f32 = my_squared_euclidean_distance_f32;
