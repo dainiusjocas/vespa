@@ -32,6 +32,7 @@ auto query_f32 = GenSpec().seq(query_seq).idx("x", 32).cells(CellType::FLOAT);
 auto query_f64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::FLOAT);
 auto query_d64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::DOUBLE);
 auto query_f256 = GenSpec().seq(query_seq).idx("x", 256).cells(CellType::FLOAT);
+auto query_y64 = GenSpec().seq(query_seq).idx("y", 64).cells(CellType::FLOAT);
 
 void assert_expr(const GenSpec& q_spec, const GenSpec& a_spec, const std::string& expr, bool optimized) {
     EvalFixture::ParamRepo param_repo;
@@ -92,8 +93,11 @@ TEST(DenseUnpackBitsDotProductFunctionTest, source_must_be_int8) {
     assert_not_optimized(query_f64, packed_vxf, "reduce(q*tensor<float>(x[64])(bit(a{x:(x/8)},7-x%8)),sum,x)");
 }
 
-TEST(DenseUnpackBitsDotProductFunctionTest, mismatched_query_dimension_is_not_optimized) {
-    assert_not_optimized(query_f32, packed_vx8, "reduce(q*tensor<float>(x[64])(bit(a{x:(x/8)},7-x%8)),sum,x)");
+TEST(DenseUnpackBitsDotProductFunctionTest, mismatched_query_dimension_name_is_not_optimized) {
+    // "y" vs "x": a well-typed (dense outer-join then reduce) expression,
+    // but not a dot product, so neither this optimizer nor
+    // DenseDotProductFunction should fire.
+    assert_not_optimized(query_y64, packed_vx8, "reduce(q*tensor<float>(x[64])(bit(a{x:(x/8)},7-x%8)),sum)");
 }
 
 TEST(DenseUnpackBitsDotProductFunctionTest, similar_expressions_are_not_optimized) {
