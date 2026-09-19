@@ -182,4 +182,20 @@ template <> struct DotProduct<BFloat16, BFloat16> {
 
 //-----------------------------------------------------------------------------
 
+// Dot product between a dense vector of LCT and a bit-packed int8 vector
+// (as unpacked by the ranking expression 'unpack_bits' function), without
+// materializing the unpacked vector. 'n_bits' is the number of bits (and
+// thus the number of lanes in 'lhs'); it is always a multiple of 8.
+template <typename LCT> struct BitDotProduct;
+
+template <> struct BitDotProduct<float> {
+    static double apply(const float* lhs, const Int8Float* packed, size_t n_bits, bool big_bitorder);
+};
+
+template <> struct BitDotProduct<double> {
+    static double apply(const double* lhs, const Int8Float* packed, size_t n_bits, bool big_bitorder);
+};
+
+//-----------------------------------------------------------------------------
+
 } // namespace vespalib::eval::operation

@@ -16,6 +16,7 @@
 #include <vespa/eval/instruction/dense_single_reduce_function.h>
 #include <vespa/eval/instruction/dense_tensor_create_function.h>
 #include <vespa/eval/instruction/dense_tensor_peek_function.h>
+#include <vespa/eval/instruction/dense_unpack_bits_dot_product_function.h>
 #include <vespa/eval/instruction/dense_xw_product_function.h>
 #include <vespa/eval/instruction/fast_rename_optimizer.h>
 #include <vespa/eval/instruction/inplace_map_function.h>
@@ -84,6 +85,12 @@ const TensorFunction& optimize_for_factory(const ValueBuilderFactory&, const Ten
         child.set(MixedL2Distance::optimize(child.get(), stash));
     });
     run_optimize_pass(root, [&stash, &options](const Child& child) {
+        // Must run before DenseDotProductFunction, which would otherwise
+        // greedily consume the reduce(join(...,mul),sum) shape with the
+        // not-yet-optimized unpack_bits lambda still attached as a child,
+        // preventing this fusion (which avoids materializing the unpacked
+        // tensor) from ever being recognized.
+        child.set(DenseUnpackBitsDotProductFunction::optimize(child.get(), stash));
         child.set(DenseDotProductFunction::optimize(child.get(), stash));
         child.set(SparseDotProductFunction::optimize(child.get(), stash));
         child.set(DenseXWProductFunction::optimize(child.get(), stash));

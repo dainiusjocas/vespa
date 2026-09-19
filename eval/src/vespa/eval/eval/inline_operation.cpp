@@ -26,4 +26,20 @@ double DotProduct<BFloat16, BFloat16>::apply(const BFloat16* lhs, const BFloat16
     return hwaccelerated::dot_product(lhs, rhs, count);
 }
 
+double BitDotProduct<float>::apply(const float* lhs, const Int8Float* packed, size_t n_bits, bool big_bitorder) {
+    static_assert(sizeof(Int8Float) == sizeof(int8_t));
+    static_assert(alignof(Int8Float) == alignof(int8_t));
+    static_assert(std::has_unique_object_representations_v<Int8Float>);
+    const auto* packed_as_i8 = reinterpret_cast<const int8_t*>(packed);
+    return hwaccelerated::bit_dot_product(lhs, packed_as_i8, n_bits, big_bitorder);
+}
+
+double BitDotProduct<double>::apply(const double* lhs, const Int8Float* packed, size_t n_bits, bool big_bitorder) {
+    static_assert(sizeof(Int8Float) == sizeof(int8_t));
+    static_assert(alignof(Int8Float) == alignof(int8_t));
+    static_assert(std::has_unique_object_representations_v<Int8Float>);
+    const auto* packed_as_i8 = reinterpret_cast<const int8_t*>(packed);
+    return hwaccelerated::bit_dot_product(lhs, packed_as_i8, n_bits, big_bitorder);
+}
+
 } // namespace vespalib::eval::operation
