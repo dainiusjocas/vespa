@@ -9,6 +9,7 @@
 #include <hwy/base.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <format>
 
@@ -112,47 +113,76 @@ float my_hwy_dot_bf16(const BFloat16* HWY_RESTRICT a, const BFloat16* HWY_RESTRI
     return MyKernel::pairwise(dbf16, df32, a_bf16, b_bf16, sz, hn::Zero(df32), kernel_fn, VecAdd(), LaneReduceSum());
 }
 
+// Bit-reversal lookup table, used to turn most-significant-bit-first
+// ('big') byte order into least-significant-bit-first ('little') order,
+// which is what `hn::LoadMaskBits` expects (bit i of byte i/8 maps to
+// lane i). Computed at compile time.
+constexpr std::array<uint8_t, 256> make_bit_reverse_lut() noexcept {
+    std::array<uint8_t, 256> lut{};
+    for (int b = 0; b < 256; ++b) {
+        uint8_t v = static_cast<uint8_t>(b);
+        uint8_t r = 0;
+        for (int i = 0; i < 8; ++i) {
+            r = static_cast<uint8_t>((r << 1) | (v & 1));
+            v = static_cast<uint8_t>(v >> 1);
+        }
+        lut[static_cast<size_t>(b)] = r;
+    }
+    return lut;
+}
+constexpr std::array<uint8_t, 256> BIT_REVERSE_LUT = make_bit_reverse_lut();
+
 // Dot product of `lhs` (n_bits lanes) against a bit-packed int8 array of
 // n_bits/8 bytes, where each unpacked lane is implicitly 0 or 1 (as if it
 // had been produced by the ranking expression 'unpack_bits' function).
-// The bits themselves are always tested with plain scalar code (this is
-// cheap: at most 8 bit tests per vector chunk), but the resulting 0/1
-// selection is applied to `lhs` and accumulated using vector multiply-add,
-// which is what dominates cost for realistic (embedding-sized) vectors.
-// Deliberately avoids any vector-width-vs-byte-boundary assumptions (e.g.
-// hardware mask-from-bits loads), since `Lanes(d)` is not guaranteed to be
-// a multiple of 8 on every target.
+// The fast path loads a hardware mask directly from the packed bytes
+// (`hn::LoadMaskBits`, least-significant-bit-first) and selects/accumulates
+// `lhs` with a single vector op per chunk; this is only correct when a
+// vector holds a whole number of bytes' worth of lanes (`Lanes(d) % 8 ==
+// 0`), which always holds for this codebase's x86 targets (AVX2 is the
+// required baseline, giving >=8 f32 lanes and >=8 f64 lanes on AVX3+) but
+// is not guaranteed on every target (e.g. f64 on AVX2 has 4 lanes, NEON
+// f32 has 4 lanes) -- those fall back to the always-correct scalar loop.
 template <typename T>
     requires(hwy::IsFloat<T>())
 HWY_INLINE double my_hwy_bit_dot_product(const T* HWY_RESTRICT lhs, const int8_t* HWY_RESTRICT packed_bits,
                                          const size_t n_bits, const bool big_bitorder) noexcept {
     const hn::ScalableTag<T> d;
     const size_t             lanes = hn::Lanes(d);
-    // Generous static upper bound on any realistic hardware vector lane
-    // count for a floating point type (e.g. 2048-bit SVE holds 64 f32
-    // lanes). Guarded unconditionally (not just via assert()) below, since
-    // this must never allow a stack buffer overrun even in a release
-    // (NDEBUG) build: if the bound is ever exceeded, the vectorized loop
-    // is simply skipped and everything falls through to the scalar path.
-    constexpr size_t max_lanes = 256;
+    const auto*              bytes = reinterpret_cast<const uint8_t*>(packed_bits);
 
-    auto extract_bit = [big_bitorder, packed_bits](size_t bit_idx) noexcept -> T {
-        uint8_t byte = static_cast<uint8_t>(packed_bits[bit_idx / 8]);
+    auto extract_bit = [big_bitorder, bytes](size_t bit_idx) noexcept -> T {
+        uint8_t byte = bytes[bit_idx / 8];
         int     bit_in_byte = big_bitorder ? (7 - static_cast<int>(bit_idx % 8)) : static_cast<int>(bit_idx % 8);
         return ((byte >> bit_in_byte) & 1) ? T(1) : T(0);
     };
 
-    T      selected[max_lanes];
     auto   accu = hn::Zero(d);
     size_t idx = 0;
-    if (lanes <= max_lanes) {
+    // Generous static upper bound (in bytes) on any realistic hardware
+    // vector lane count for a floating point type. Guarded unconditionally
+    // below (not just via assert()), since a release (NDEBUG) build must
+    // never allow a stack buffer overrun: if the bound is ever exceeded,
+    // the fast loop is simply skipped and everything falls through to the
+    // scalar path.
+    constexpr size_t max_bytes_per_chunk = 32; // covers up to 256 lanes
+    if (((lanes % 8) == 0) && ((lanes / 8) <= max_bytes_per_chunk)) {
+        const size_t bytes_per_chunk = lanes / 8;
+        uint8_t      chunk[max_bytes_per_chunk];
         for (; idx + lanes <= n_bits; idx += lanes) {
-            for (size_t j = 0; j < lanes; ++j) {
-                selected[j] = extract_bit(idx + j);
+            const uint8_t* src = bytes + (idx / 8);
+            if (big_bitorder) {
+                for (size_t k = 0; k < bytes_per_chunk; ++k) {
+                    chunk[k] = BIT_REVERSE_LUT[src[k]];
+                }
+            } else {
+                for (size_t k = 0; k < bytes_per_chunk; ++k) {
+                    chunk[k] = src[k];
+                }
             }
-            const auto sel_vec = hn::LoadU(d, selected);
+            const auto mask = hn::LoadMaskBits(d, chunk);
             const auto lhs_vec = hn::LoadU(d, lhs + idx);
-            accu = hn::MulAdd(sel_vec, lhs_vec, accu);
+            accu = hn::Add(accu, hn::IfThenElseZero(mask, lhs_vec));
         }
     }
     double sum = static_cast<double>(hn::ReduceSum(d, accu));
