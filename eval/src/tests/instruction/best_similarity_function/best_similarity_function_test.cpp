@@ -1,6 +1,7 @@
 // Copyright Vespa.ai. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
 
 #include <vespa/eval/eval/fast_value.h>
+#include <vespa/eval/eval/simple_value.h>
 #include <vespa/eval/eval/tensor_function.h>
 #include <vespa/eval/eval/test/eval_fixture.h>
 #include <vespa/eval/eval/test/gen_spec.h>
@@ -12,6 +13,7 @@ using namespace vespalib::eval;
 using namespace vespalib::eval::test;
 
 const ValueBuilderFactory& prod_factory = FastValueBuilderFactory::get();
+const ValueBuilderFactory& test_factory = SimpleValueBuilderFactory::get();
 
 //-----------------------------------------------------------------------------
 
@@ -148,6 +150,80 @@ TEST(BestSimilarityFunctionTest, similar_expressions_are_not_optimized) {
     verify(gen_float("d8", 3), gen_float("b5d8", 7), other_reduce, false);
     verify(gen_float("d8", 3), gen_float("b5d8", 7), mismatch_best_sim, false);
     verify(gen_int8("d8", 3), gen_int8("b5d8", 7), mismatch_best_hamming, false);
+}
+
+//-----------------------------------------------------------------------------
+// Asymmetric case: float/double query vector vs. an int8-packed document tensor that would
+// otherwise need 'unpack_bits' applied to it first. All test data uses small integer values
+// so that summation order and intermediate precision can never affect the result, matching
+// the convention used in dense_unpack_bits_dot_product_function_test.cpp.
+
+auto packed_seq = Seq({-128, -43, 85, 127});
+auto query_seq = Seq({1, 2, 3, 5, 8, 13, 21, 34});
+
+// 'm' is the best (max-reduced) dimension, sized 3; 'x' holds 8 packed bytes (64 bits).
+auto packed_indexed_cnum = GenSpec().seq(packed_seq).idx("m", 3).idx("x", 8).cells(CellType::INT8);
+auto packed_mapped_cnum =
+    GenSpec().seq(packed_seq).map("m", {"c0", "c1", "c2"}).idx("x", 8).cells(CellType::INT8);
+auto packed_indexed_cnum_float = GenSpec().seq(packed_seq).idx("m", 3).idx("x", 8).cells(CellType::FLOAT);
+auto query_f64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::FLOAT);
+auto query_d64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::DOUBLE);
+auto query_f32 = GenSpec().seq(query_seq).idx("x", 32).cells(CellType::FLOAT);
+
+std::string indexed_cnum_expr(const std::string& bit_expr) {
+    return "reduce(reduce(q*tensor<float>(m[3],x[64])(bit(a{m:(m),x:(x/8)}," + bit_expr + ")),sum,x),max,m)";
+}
+
+std::string mapped_cnum_expr(const std::string& bit_expr) {
+    return "reduce(reduce(q*map_subspaces(a,f(a)(tensor<float>(x[64])(bit(a{x:(x/8)}," + bit_expr +
+          ")))),sum,x),max,m)";
+}
+
+void assert_unpack_bits_maxsim(const GenSpec& q_spec, const GenSpec& a_spec, const std::string& expr,
+                               bool optimized) {
+    EvalFixture::ParamRepo param_repo;
+    param_repo.add("q", q_spec);
+    param_repo.add("a", a_spec);
+    EvalFixture fast_fixture(prod_factory, expr, param_repo, true);
+    EvalFixture test_fixture(test_factory, expr, param_repo, true);
+    EvalFixture slow_fixture(prod_factory, expr, param_repo, false);
+    auto        expect = EvalFixture::ref(expr, param_repo);
+    EXPECT_EQ(fast_fixture.result(), expect);
+    EXPECT_EQ(test_fixture.result(), expect);
+    EXPECT_EQ(slow_fixture.result(), expect);
+    EXPECT_EQ(fast_fixture.find_all<BestSimilarityFunction>().size(), optimized ? 1u : 0u);
+    EXPECT_EQ(test_fixture.find_all<BestSimilarityFunction>().size(), optimized ? 1u : 0u);
+    EXPECT_EQ(slow_fixture.find_all<BestSimilarityFunction>().size(), 0u);
+}
+
+TEST(BestSimilarityFunctionTest, unpack_bits_max_sim_indexed_cnum_is_optimized) {
+    assert_unpack_bits_maxsim(query_f64, packed_indexed_cnum, indexed_cnum_expr("7-x%8"), true);
+    assert_unpack_bits_maxsim(query_f64, packed_indexed_cnum, indexed_cnum_expr("x%8"), true);
+    assert_unpack_bits_maxsim(query_d64, packed_indexed_cnum, indexed_cnum_expr("7-x%8"), true);
+}
+
+TEST(BestSimilarityFunctionTest, unpack_bits_max_sim_mapped_cnum_is_optimized) {
+    assert_unpack_bits_maxsim(query_f64, packed_mapped_cnum, mapped_cnum_expr("7-x%8"), true);
+    assert_unpack_bits_maxsim(query_f64, packed_mapped_cnum, mapped_cnum_expr("x%8"), true);
+    assert_unpack_bits_maxsim(query_d64, packed_mapped_cnum, mapped_cnum_expr("7-x%8"), true);
+}
+
+TEST(BestSimilarityFunctionTest, unpack_bits_max_sim_operand_order_can_be_swapped) {
+    std::string expr = "reduce(reduce(tensor<float>(m[3],x[64])(bit(a{m:(m),x:(x/8)},7-x%8))*q,sum,x),max,m)";
+    assert_unpack_bits_maxsim(query_f64, packed_indexed_cnum, expr, true);
+}
+
+TEST(BestSimilarityFunctionTest, unpack_bits_min_aggregator_is_not_optimized) {
+    std::string expr = "reduce(reduce(q*tensor<float>(m[3],x[64])(bit(a{m:(m),x:(x/8)},7-x%8)),sum,x),min,m)";
+    assert_unpack_bits_maxsim(query_f64, packed_indexed_cnum, expr, false);
+}
+
+TEST(BestSimilarityFunctionTest, unpack_bits_mismatched_query_dimension_is_not_optimized) {
+    assert_unpack_bits_maxsim(query_f32, packed_indexed_cnum, indexed_cnum_expr("7-x%8"), false);
+}
+
+TEST(BestSimilarityFunctionTest, unpack_bits_packed_source_must_be_int8) {
+    assert_unpack_bits_maxsim(query_f64, packed_indexed_cnum_float, indexed_cnum_expr("7-x%8"), false);
 }
 
 //-----------------------------------------------------------------------------
