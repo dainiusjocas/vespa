@@ -185,11 +185,15 @@ HWY_INLINE double my_hwy_bit_dot_product(const T* HWY_RESTRICT lhs, const int8_t
             accu = hn::Add(accu, hn::IfThenElseZero(mask, lhs_vec));
         }
     }
-    double sum = static_cast<double>(hn::ReduceSum(d, accu));
+    // Accumulate the (always < lanes, so negligible) remainder in T rather
+    // than double, matching the precision of the vectorized part above
+    // (and of the old cblas_sdot-based path for T=float) as closely as
+    // possible; only the final sum is widened to double.
+    T scalar_sum = T(0);
     for (; idx < n_bits; ++idx) {
-        sum += static_cast<double>(lhs[idx]) * static_cast<double>(extract_bit(idx));
+        scalar_sum += extract_bit(idx) ? lhs[idx] : T(0);
     }
-    return sum;
+    return static_cast<double>(hn::ReduceSum(d, accu)) + static_cast<double>(scalar_sum);
 }
 
 template <typename T>
