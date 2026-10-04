@@ -487,6 +487,7 @@ void verify_active_function_table() {
     verify_dot_product<int64_t>();
     verify_bit_dot_product<float>();
     verify_bit_dot_product<double>();
+    verify_bit_dot_product<BFloat16>();
     verify_euclidean_distance<int8_t, int64_t>();
     verify_euclidean_distance<float>();
     verify_euclidean_distance<double>();

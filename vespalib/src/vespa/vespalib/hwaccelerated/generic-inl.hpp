@@ -142,6 +142,10 @@ double my_bit_dot_product_f64(const double* lhs, const int8_t* packed_bits, size
                               bool big_bitorder) noexcept {
     return bit_dot_product_scalar(lhs, packed_bits, n_bits, big_bitorder);
 }
+double my_bit_dot_product_bf16(const BFloat16* lhs, const int8_t* packed_bits, size_t n_bits,
+                               bool big_bitorder) noexcept {
+    return bit_dot_product_scalar(lhs, packed_bits, n_bits, big_bitorder);
+}
 double my_squared_euclidean_distance_i8(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return helper::squaredEuclideanDistance(a, b, sz);
 }

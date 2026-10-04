@@ -31,6 +31,7 @@ auto packed_vxf = GenSpec().seq(packed_seq).idx("x", 8).cells(CellType::FLOAT); 
 auto query_f32 = GenSpec().seq(query_seq).idx("x", 32).cells(CellType::FLOAT);
 auto query_f64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::FLOAT);
 auto query_d64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::DOUBLE);
+auto query_b64 = GenSpec().seq(query_seq).idx("x", 64).cells(CellType::BFLOAT16);
 auto query_f256 = GenSpec().seq(query_seq).idx("x", 256).cells(CellType::FLOAT);
 auto query_y64 = GenSpec().seq(query_seq).idx("y", 64).cells(CellType::FLOAT);
 
@@ -74,6 +75,12 @@ TEST(DenseUnpackBitsDotProductFunctionTest, unpack_bits_times_query_is_also_opti
 
 TEST(DenseUnpackBitsDotProductFunctionTest, double_query_is_optimized) {
     assert_optimized(query_d64, packed_vx8, "reduce(q*tensor<float>(x[64])(bit(a{x:(x/8)},7-x%8)),sum,x)");
+}
+
+TEST(DenseUnpackBitsDotProductFunctionTest, bfloat16_query_is_optimized) {
+    assert_optimized(query_b64, packed_vx8, "reduce(q*tensor<float>(x[64])(bit(a{x:(x/8)},7-x%8)),sum,x)");
+    assert_optimized(query_b64, packed_vx8, "reduce(q*tensor<float>(x[64])(bit(a{x:(x/8)},x%8)),sum,x)");
+    assert_optimized(query_b64, packed_vx8, "reduce(q*tensor<bfloat16>(x[64])(bit(a{x:(x/8)},7-x%8)),sum,x)");
 }
 
 TEST(DenseUnpackBitsDotProductFunctionTest, declared_unpacked_cell_type_is_irrelevant) {

@@ -9,6 +9,7 @@
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <format>
 #include <type_traits>
 
@@ -99,9 +100,14 @@ void register_accel_bit_dot_product_benchmark(std::string_view name, std::unique
     auto        bench_fn = [accel = std::move(accel), big_bitorder](benchmark::State& state) {
         const auto             n_bits = static_cast<size_t>(state.range());
         Xoshiro256PlusPlusPrng prng(1234567);
-        std::vector<T>         lhs = create_and_fill_float<T>(prng, n_bits);
-        std::vector<int8_t>    packed = create_and_fill<int8_t>(prng, n_bits / 8);
-        ScopedFnTableOverride  fn_scope(accel->fn_table());
+        std::vector<T>         lhs(n_bits);
+        if constexpr (std::is_same_v<T, BFloat16>) {
+            std::ranges::copy(create_and_fill_float<float>(prng, n_bits), lhs.begin()); // implicit f32 -> bf16
+        } else {
+            lhs = create_and_fill_float<T>(prng, n_bits);
+        }
+        std::vector<int8_t>   packed = create_and_fill<int8_t>(prng, n_bits / 8);
+        ScopedFnTableOverride fn_scope(accel->fn_table());
         for (auto _ : state) {
             auto result = bit_dot_product(lhs.data(), packed.data(), n_bits, big_bitorder);
             benchmark::DoNotOptimize(result);
@@ -158,6 +164,7 @@ void register_all_benchmark_suites() {
 
     register_bit_dot_product_benchmarks<double>("Bit Dot Product", FnTable::FnId::BIT_DOT_PRODUCT_F64);
     register_bit_dot_product_benchmarks<float>("Bit Dot Product", FnTable::FnId::BIT_DOT_PRODUCT_F32);
+    register_bit_dot_product_benchmarks<BFloat16>("Bit Dot Product", FnTable::FnId::BIT_DOT_PRODUCT_BF16);
 
     auto binary_hamming_fn = [](const auto* lhs, const auto* rhs, size_t my_sz) {
         return binary_hamming_distance(lhs, rhs, my_sz);

@@ -8,6 +8,7 @@
 #include <vespa/eval/eval/value.h>
 
 #include <cassert>
+#include <cstdlib>
 
 namespace vespalib::eval {
 
@@ -25,7 +26,8 @@ template <typename LCT, bool big> void my_bit_dot_product_op(InterpretedFunction
 
 bool is_plain_dense_operand(const ValueType& type) {
     return type.is_dense() && (type.count_indexed_dimensions() == 1) &&
-           ((type.cell_type() == CellType::FLOAT) || (type.cell_type() == CellType::DOUBLE));
+           ((type.cell_type() == CellType::FLOAT) || (type.cell_type() == CellType::DOUBLE) ||
+            (type.cell_type() == CellType::BFLOAT16));
 }
 
 } // namespace
@@ -38,11 +40,21 @@ DenseUnpackBitsDotProductFunction::DenseUnpackBitsDotProductFunction(const Tenso
 
 InterpretedFunction::Instruction DenseUnpackBitsDotProductFunction::compile_self(const ValueBuilderFactory&,
                                                                                  Stash&) const {
-    auto lct = lhs().result_type().cell_type();
-    assert((lct == CellType::FLOAT) || (lct == CellType::DOUBLE));
-    auto op = (lct == CellType::FLOAT)
-                  ? (_big_bitorder ? my_bit_dot_product_op<float, true> : my_bit_dot_product_op<float, false>)
-                  : (_big_bitorder ? my_bit_dot_product_op<double, true> : my_bit_dot_product_op<double, false>);
+    auto                             lct = lhs().result_type().cell_type();
+    InterpretedFunction::op_function op = nullptr;
+    switch (lct) {
+    case CellType::FLOAT:
+        op = _big_bitorder ? my_bit_dot_product_op<float, true> : my_bit_dot_product_op<float, false>;
+        break;
+    case CellType::DOUBLE:
+        op = _big_bitorder ? my_bit_dot_product_op<double, true> : my_bit_dot_product_op<double, false>;
+        break;
+    case CellType::BFLOAT16:
+        op = _big_bitorder ? my_bit_dot_product_op<BFloat16, true> : my_bit_dot_product_op<BFloat16, false>;
+        break;
+    default:
+        abort(); // is_plain_dense_operand() guarantees one of the above
+    }
     return InterpretedFunction::Instruction(op);
 }
 

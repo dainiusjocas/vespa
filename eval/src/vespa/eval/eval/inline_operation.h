@@ -196,6 +196,10 @@ template <> struct BitDotProduct<double> {
     static double apply(const double* lhs, const Int8Float* packed, size_t n_bits, bool big_bitorder);
 };
 
+template <> struct BitDotProduct<BFloat16> {
+    static double apply(const BFloat16* lhs, const Int8Float* packed, size_t n_bits, bool big_bitorder);
+};
+
 //-----------------------------------------------------------------------------
 
 } // namespace vespalib::eval::operation

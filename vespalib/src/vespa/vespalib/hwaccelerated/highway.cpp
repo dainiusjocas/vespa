@@ -146,6 +146,45 @@ HWY_INLINE TU load_packed_bytes(const uint8_t* HWY_RESTRICT p, const size_t n_by
     return w;
 }
 
+// Loads one vector of lhs values with D's lane type. LT is either that lane type itself, or
+// uint16_t holding the raw bits of a BFloat16, which is widened to f32 (D must then be an f32
+// tag) by zero-extending to 32 bits and shifting left by 16; this is exact, as BF16 is just
+// the upper half of an IEEE binary32.
+template <class D, typename LT> HWY_INLINE hn::Vec<D> load_lhs(D d, const LT* HWY_RESTRICT p) noexcept {
+    if constexpr (hwy::IsSame<LT, hn::TFromD<D>>()) {
+        return hn::LoadU(d, p);
+    } else {
+        static_assert(hwy::IsSame<LT, uint16_t>() && hwy::IsSame<hn::TFromD<D>, float>());
+        const hn::Rebind<uint16_t, D> du16;
+        const hn::RebindToUnsigned<D> du32;
+        return hn::BitCast(d, hn::ShiftLeft<16>(hn::PromoteTo(du32, hn::LoadU(du16, p))));
+    }
+}
+
+// As load_lhs, but only loads the first `n` (< Lanes(d)) lanes; the rest are zero. Never
+// reads beyond p + n.
+template <class D, typename LT>
+HWY_INLINE hn::Vec<D> load_lhs_n(D d, const LT* HWY_RESTRICT p, const size_t n) noexcept {
+    if constexpr (hwy::IsSame<LT, hn::TFromD<D>>()) {
+        return hn::LoadN(d, p, n);
+    } else {
+        static_assert(hwy::IsSame<LT, uint16_t>() && hwy::IsSame<hn::TFromD<D>, float>());
+        const hn::Rebind<uint16_t, D> du16;
+        const hn::RebindToUnsigned<D> du32;
+        return hn::BitCast(d, hn::ShiftLeft<16>(hn::PromoteTo(du32, hn::LoadN(du16, p, n))));
+    }
+}
+
+// Scalar counterpart of load_lhs for a single element.
+template <typename T, typename LT> HWY_INLINE T lhs_to_scalar(const LT v) noexcept {
+    if constexpr (hwy::IsSame<LT, T>()) {
+        return v;
+    } else {
+        static_assert(hwy::IsSame<LT, uint16_t>() && hwy::IsSame<T, float>());
+        return hwy::BitCastScalar<float>(static_cast<uint32_t>(v) << 16);
+    }
+}
+
 // acc[i] += v[i] for all lanes i where m[i] is set; all other lanes of acc are unchanged.
 template <typename V, typename M> HWY_INLINE V masked_accumulate(V acc, M m, V v) noexcept {
 #if (HWY_TARGET <= HWY_AVX3) || ((HWY_TARGET & HWY_ALL_SVE) != 0)
@@ -179,9 +218,13 @@ template <typename V, typename M> HWY_INLINE V masked_accumulate(V acc, M m, V v
 // Both are unrolled across 4 independent accumulators to hide FP add latency. Any other
 // (exotic) lane count falls back to an always-correct scalar loop; this never happens on
 // the hardware we target.
-template <bool big_bitorder, typename T>
+//
+// T is the lane type used for computing (f32 or f64), LT the storage type of `lhs`; these
+// differ only for BFloat16 input, which is passed as its raw uint16_t bits and widened to
+// f32 on load (see load_lhs).
+template <bool big_bitorder, typename T, typename LT>
     requires(hwy::IsFloat<T>())
-HWY_INLINE double my_hwy_bit_dot_product_impl(const T* HWY_RESTRICT lhs, const uint8_t* HWY_RESTRICT bytes,
+HWY_INLINE double my_hwy_bit_dot_product_impl(const LT* HWY_RESTRICT lhs, const uint8_t* HWY_RESTRICT bytes,
                                               const size_t n_bits) noexcept {
     using TU = hwy::MakeUnsigned<T>;
     const hn::ScalableTag<T>                d;
@@ -207,7 +250,7 @@ HWY_INLINE double my_hwy_bit_dot_product_impl(const T* HWY_RESTRICT lhs, const u
         auto         step = [&](V& acc, size_t byte_idx) VESPA_HWY_LAMBDA {
             const auto word = hn::Set(du, load_packed_bytes<TU>(bytes + byte_idx, bpv));
             const auto mask = hn::RebindMask(d, hn::TestBit(word, sel_base));
-            acc = masked_accumulate(acc, mask, hn::LoadU(d, lhs + (byte_idx * 8)));
+            acc = masked_accumulate(acc, mask, load_lhs(d, lhs + (byte_idx * 8)));
         };
         size_t byte_idx = 0;
         for (; (byte_idx + (4 * bpv)) <= n_bytes; byte_idx += 4 * bpv) {
@@ -226,7 +269,7 @@ HWY_INLINE double my_hwy_bit_dot_product_impl(const T* HWY_RESTRICT lhs, const u
             const size_t rem_bytes = n_bytes - byte_idx;
             const auto   word = hn::Set(du, load_packed_bytes<TU>(bytes + byte_idx, rem_bytes));
             const auto   mask = hn::RebindMask(d, hn::TestBit(word, sel_base));
-            acc0 = masked_accumulate(acc0, mask, hn::LoadN(d, lhs + (byte_idx * 8), rem_bytes * 8));
+            acc0 = masked_accumulate(acc0, mask, load_lhs_n(d, lhs + (byte_idx * 8), rem_bytes * 8));
         }
     } else if ((lanes >= 2) && ((8 % lanes) == 0)) {
         // < 8 lanes per vector; each byte spans `vpb` consecutive vectors.
@@ -236,7 +279,7 @@ HWY_INLINE double my_hwy_bit_dot_product_impl(const T* HWY_RESTRICT lhs, const u
             const int  shift = static_cast<int>(sub * lanes);
             const auto sel = big_bitorder ? hn::ShiftRightSame(sel_base, shift) : hn::ShiftLeftSame(sel_base, shift);
             const auto mask = hn::RebindMask(d, hn::TestBit(word, sel));
-            acc = masked_accumulate(acc, mask, hn::LoadU(d, lhs + (byte_idx * 8) + (sub * lanes)));
+            acc = masked_accumulate(acc, mask, load_lhs(d, lhs + (byte_idx * 8) + (sub * lanes)));
         };
         // Process (at least) 4 vectors per iteration; `bpi` bytes per iteration.
         const size_t bpi = std::max<size_t>(1, 4 / vpb);
@@ -261,7 +304,7 @@ HWY_INLINE double my_hwy_bit_dot_product_impl(const T* HWY_RESTRICT lhs, const u
             const auto byte = static_cast<uint8_t>(bytes[i / 8]);
             const int  bit_in_byte = big_bitorder ? (7 - static_cast<int>(i % 8)) : static_cast<int>(i % 8);
             if ((byte >> bit_in_byte) & 1) {
-                sum += lhs[i];
+                sum += lhs_to_scalar<T>(lhs[i]);
             }
         }
         return static_cast<double>(sum);
@@ -274,8 +317,21 @@ template <typename T>
 HWY_INLINE double my_hwy_bit_dot_product(const T* HWY_RESTRICT lhs, const int8_t* HWY_RESTRICT packed_bits,
                                          const size_t n_bits, const bool big_bitorder) noexcept {
     const auto* bytes = reinterpret_cast<const uint8_t*>(packed_bits);
-    return big_bitorder ? my_hwy_bit_dot_product_impl<true>(lhs, bytes, n_bits)
-                        : my_hwy_bit_dot_product_impl<false>(lhs, bytes, n_bits);
+    return big_bitorder ? my_hwy_bit_dot_product_impl<true, T>(lhs, bytes, n_bits)
+                        : my_hwy_bit_dot_product_impl<false, T>(lhs, bytes, n_bits);
+}
+
+HWY_INLINE
+double my_hwy_bit_dot_product_bf16(const BFloat16* HWY_RESTRICT lhs, const int8_t* HWY_RESTRICT packed_bits,
+                                   const size_t n_bits, const bool big_bitorder) noexcept {
+    static_assert(sizeof(BFloat16) == sizeof(uint16_t));
+    static_assert(alignof(BFloat16) == alignof(uint16_t));
+    // vespalib::BFloat16 is a POD-like wrapper around the u16 bitwise representation of the
+    // upper half of a binary32, so we can treat it as-if a plain u16 and widen in-register.
+    const auto* lhs_bits = reinterpret_cast<const uint16_t*>(lhs);
+    const auto* bytes = reinterpret_cast<const uint8_t*>(packed_bits);
+    return big_bitorder ? my_hwy_bit_dot_product_impl<true, float>(lhs_bits, bytes, n_bits)
+                        : my_hwy_bit_dot_product_impl<false, float>(lhs_bits, bytes, n_bits);
 }
 
 template <typename T>
@@ -474,6 +530,10 @@ double my_bit_dot_product_f64(const double* lhs, const int8_t* packed_bits, size
                               bool big_bitorder) noexcept {
     return my_hwy_bit_dot_product(lhs, packed_bits, n_bits, big_bitorder);
 }
+double my_bit_dot_product_bf16(const BFloat16* lhs, const int8_t* packed_bits, size_t n_bits,
+                               bool big_bitorder) noexcept {
+    return my_hwy_bit_dot_product_bf16(lhs, packed_bits, n_bits, big_bitorder);
+}
 double my_squared_euclidean_distance_i8(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return my_hwy_square_euclidean_distance_int8(a, b, sz);
 }
@@ -516,6 +576,7 @@ public:
         ft.dot_product_f64 = my_dot_product_f64;
         ft.bit_dot_product_f32 = my_bit_dot_product_f32;
         ft.bit_dot_product_f64 = my_bit_dot_product_f64;
+        ft.bit_dot_product_bf16 = my_bit_dot_product_bf16;
         ft.squared_euclidean_distance_i8 = my_squared_euclidean_distance_i8;
         ft.squared_euclidean_distance_bf16 = my_squared_euclidean_distance_bf16;
         ft.squared_euclidean_distance_f32 = my_squared_euclidean_distance_f32;

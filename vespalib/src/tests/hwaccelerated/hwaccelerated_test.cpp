@@ -198,7 +198,7 @@ double reference_bit_dot_product(const T* lhs, const int8_t* packed, size_t n_bi
     return sum;
 }
 
-template <std::floating_point T>
+template <typename T>
 void verify_bit_dot_product(std::span<const IAccelerated*> accels, size_t test_length, double approx_factor) {
     // The number of bits is always a multiple of 8 (whole bytes), but is not otherwise
     // required to be aligned to any particular vector width.
@@ -232,6 +232,8 @@ TEST_F(HwAcceleratedTest, bit_dot_product_impls_match_source_of_truth) {
         ASSERT_NO_FATAL_FAILURE(verify_bit_dot_product<float>(accelerators, test_length, 0.0001))
             << "with length " << test_length;
         ASSERT_NO_FATAL_FAILURE(verify_bit_dot_product<double>(accelerators, test_length, 0.0))
+            << "with length " << test_length;
+        ASSERT_NO_FATAL_FAILURE(verify_bit_dot_product<BFloat16>(accelerators, test_length, 0.0001))
             << "with length " << test_length;
     }
 }
