@@ -8,7 +8,7 @@ namespace vespalib::eval {
 
 /**
  * Fused tensor function computing the dot product between a dense
- * 1-dimensional float/double vector and a bit-packed int8 vector
+ * 1-dimensional float/double/bfloat16 vector and a bit-packed int8 vector
  * that would otherwise need to be unpacked with 'unpack_bits'
  * first, i.e. a fused version of:
  *

@@ -53,6 +53,11 @@ namespace vespalib::hwaccelerated {
     return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(bit_dot_product_f64)(lhs, packed_bits, n_bits, big_bitorder);
 }
 
+[[nodiscard]] inline double bit_dot_product(const BFloat16* lhs, const int8_t* packed_bits, size_t n_bits,
+                                            bool big_bitorder) noexcept {
+    return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(bit_dot_product_bf16)(lhs, packed_bits, n_bits, big_bitorder);
+}
+
 [[nodiscard]] inline double squared_euclidean_distance(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(squared_euclidean_distance_i8)(a, b, sz);
 }
