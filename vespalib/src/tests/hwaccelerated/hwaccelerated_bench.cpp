@@ -88,6 +88,48 @@ template <typename T, typename Fn> void register_benchmarks(std::string_view nam
     }
 }
 
+// Bit-packed dot product: lhs is a full-precision T vector of `n_bits` lanes, rhs is a
+// bit-packed int8 vector of `n_bits / 8` bytes (each bit implicitly 0 or 1).
+template <typename T>
+void register_accel_bit_dot_product_benchmark(std::string_view name, std::unique_ptr<IAccelerated> accel,
+                                              bool big_bitorder) {
+    const auto  accel_target = accel->target_info();
+    std::string instance_name = std::format("{}/{}/{}/{}/{}", name, type_string<T>(), big_bitorder ? "big" : "little",
+                                            accel_target.implementation_name(), accel_target.target_name());
+    auto        bench_fn = [accel = std::move(accel), big_bitorder](benchmark::State& state) {
+        const auto             n_bits = static_cast<size_t>(state.range());
+        Xoshiro256PlusPlusPrng prng(1234567);
+        std::vector<T>         lhs = create_and_fill_float<T>(prng, n_bits);
+        std::vector<int8_t>    packed = create_and_fill<int8_t>(prng, n_bits / 8);
+        ScopedFnTableOverride  fn_scope(accel->fn_table());
+        for (auto _ : state) {
+            auto result = bit_dot_product(lhs.data(), packed.data(), n_bits, big_bitorder);
+            benchmark::DoNotOptimize(result);
+        }
+        state.SetItemsProcessed(n_bits * state.iterations());
+        state.SetBytesProcessed(((sizeof(T) * n_bits) + (n_bits / 8)) * state.iterations());
+    };
+    auto* bench = benchmark::RegisterBenchmark(instance_name, std::move(bench_fn));
+    bench->RangeMultiplier(2)->Range(8, 8 << 10); // Range is in number of _bits_ (i.e. lhs elements)
+}
+
+template <typename T> void register_bit_dot_product_benchmarks(std::string_view name, FnTable::FnId fn_id) {
+    for (bool big_bitorder : {false, true}) {
+        auto hwy_targets = Highway::create_supported_targets();
+        for (auto& t : hwy_targets) {
+            if (t->fn_table().has_fn(fn_id)) {
+                register_accel_bit_dot_product_benchmark<T>(name, std::move(t), big_bitorder);
+            }
+        }
+        auto auto_vec_targets = IAccelerated::create_supported_auto_vectorized_targets();
+        for (auto& t : auto_vec_targets) {
+            if (t->fn_table().has_fn(fn_id)) {
+                register_accel_bit_dot_product_benchmark<T>(name, std::move(t), big_bitorder);
+            }
+        }
+    }
+}
+
 void register_all_benchmark_suites() {
     auto euclidean_dist_fn = [](const auto* lhs, const auto* rhs, size_t my_sz) {
         return squared_euclidean_distance(lhs, rhs, my_sz);
@@ -113,6 +155,9 @@ void register_all_benchmark_suites() {
     register_benchmarks<float>("Dot Product", FnTable::FnId::DOT_PRODUCT_F32, dot_product_fn);
     register_benchmarks<BFloat16>("Dot Product", FnTable::FnId::DOT_PRODUCT_BF16, dot_product_fn);
     register_benchmarks<int8_t>("Dot Product", FnTable::FnId::DOT_PRODUCT_I8, dot_product_fn);
+
+    register_bit_dot_product_benchmarks<double>("Bit Dot Product", FnTable::FnId::BIT_DOT_PRODUCT_F64);
+    register_bit_dot_product_benchmarks<float>("Bit Dot Product", FnTable::FnId::BIT_DOT_PRODUCT_F32);
 
     auto binary_hamming_fn = [](const auto* lhs, const auto* rhs, size_t my_sz) {
         return binary_hamming_distance(lhs, rhs, my_sz);

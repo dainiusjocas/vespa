@@ -13,6 +13,8 @@
 
 #include <gmock/gmock.h>
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <random>
 
@@ -178,6 +180,59 @@ TEST_F(HwAcceleratedTest, dot_product_impls_match_source_of_truth) {
     auto accelerators = all_accelerators_to_test();
     for (size_t test_length : test_lengths()) {
         ASSERT_NO_FATAL_FAILURE(verify_dot_product(accelerators, test_length)) << "with length " << test_length;
+    }
+}
+
+// Reference implementation of a dot product between `lhs` and a bit-packed vector,
+// where bit `i` is bit (i % 8) [little] or (7 - (i % 8)) [big] of byte (i / 8).
+template <typename T>
+double reference_bit_dot_product(const T* lhs, const int8_t* packed, size_t n_bits, bool big_bitorder) {
+    double sum = 0; // Assume a double has sufficient precision for all test inputs/outputs
+    for (size_t i = 0; i < n_bits; i++) {
+        const auto byte = static_cast<uint8_t>(packed[i / 8]);
+        const int  bit_in_byte = big_bitorder ? (7 - static_cast<int>(i % 8)) : static_cast<int>(i % 8);
+        if ((byte >> bit_in_byte) & 1) {
+            sum += lhs[i];
+        }
+    }
+    return sum;
+}
+
+template <std::floating_point T>
+void verify_bit_dot_product(std::span<const IAccelerated*> accels, size_t test_length, double approx_factor) {
+    // The number of bits is always a multiple of 8 (whole bytes), but is not otherwise
+    // required to be aligned to any particular vector width.
+    const size_t           n_bytes = test_length / 8;
+    Xoshiro256PlusPlusPrng prng(1234567);
+    std::vector<T>         lhs = create_and_fill<T>(prng, n_bytes * 8);
+    std::vector<int8_t>    packed = create_and_fill<int8_t>(prng, n_bytes);
+    for (bool big_bitorder : {false, true}) {
+        // Vary the byte offset (and thereby also the number of bits) to cover all possible
+        // remainders relative to any realistic vector width, including an empty input.
+        for (size_t j = 0; j <= std::min<size_t>(32, n_bytes); j++) {
+            const size_t n_bits = (n_bytes - j) * 8;
+            const T*     lhs_at = lhs.data() + (j * 8);
+            const auto*  packed_at = packed.data() + j;
+            const double sum = reference_bit_dot_product(lhs_at, packed_at, n_bits, big_bitorder);
+            for (const auto* accel : accels) {
+                LOG(spam, "verify_bit_dot_product(accel=%s, n_bits=%zu, big=%d)",
+                    accel->target_info().to_string().c_str(), n_bits, big_bitorder);
+                ScopedFnTableOverride fn_scope(accel->fn_table());
+                const double          computed = bit_dot_product(lhs_at, packed_at, n_bits, big_bitorder);
+                ASSERT_NEAR(sum, computed, std::fabs(sum * approx_factor))
+                    << accel->target_info().to_string() << " n_bits=" << n_bits << " big=" << big_bitorder;
+            }
+        }
+    }
+}
+
+TEST_F(HwAcceleratedTest, bit_dot_product_impls_match_source_of_truth) {
+    auto accelerators = all_accelerators_to_test();
+    for (size_t test_length : test_lengths()) {
+        ASSERT_NO_FATAL_FAILURE(verify_bit_dot_product<float>(accelerators, test_length, 0.0001))
+            << "with length " << test_length;
+        ASSERT_NO_FATAL_FAILURE(verify_bit_dot_product<double>(accelerators, test_length, 0.0))
+            << "with length " << test_length;
     }
 }
 

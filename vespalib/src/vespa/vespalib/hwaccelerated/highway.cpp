@@ -9,8 +9,8 @@
 #include <hwy/base.h>
 
 #include <algorithm>
-#include <array>
 #include <cassert>
+#include <cstring>
 #include <format>
 
 // clang-format off
@@ -113,87 +113,169 @@ float my_hwy_dot_bf16(const BFloat16* HWY_RESTRICT a, const BFloat16* HWY_RESTRI
     return MyKernel::pairwise(dbf16, df32, a_bf16, b_bf16, sz, hn::Zero(df32), kernel_fn, VecAdd(), LaneReduceSum());
 }
 
-// Bit-reversal lookup table, used to turn most-significant-bit-first
-// ('big') byte order into least-significant-bit-first ('little') order,
-// which is what `hn::LoadMaskBits` expects (bit i of byte i/8 maps to
-// lane i). Computed at compile time.
-constexpr std::array<uint8_t, 256> make_bit_reverse_lut() noexcept {
-    std::array<uint8_t, 256> lut{};
-    for (int b = 0; b < 256; ++b) {
-        uint8_t v = static_cast<uint8_t>(b);
-        uint8_t r = 0;
-        for (int i = 0; i < 8; ++i) {
-            r = static_cast<uint8_t>((r << 1) | (v & 1));
-            v = static_cast<uint8_t>(v >> 1);
-        }
-        lut[static_cast<size_t>(b)] = r;
+// Loads the `n_bytes` (1 <= n_bytes <= sizeof(TU)) bytes at `p` into the low bits of
+// a TU, zero-extended, with byte k ending up in bits [8k, 8k+8). For all fixed-width
+// targets `n_bytes` is a compile-time constant and this collapses into a single
+// (zero-extending) load; the explicit cases are there to avoid a variable-length
+// memcpy call on scalable (SVE) targets where the lane count is only known at runtime.
+template <typename TU>
+    requires(hwy::IsUnsigned<TU>())
+HWY_INLINE TU load_packed_bytes(const uint8_t* HWY_RESTRICT p, const size_t n_bytes) noexcept {
+    static_assert(HWY_IS_LITTLE_ENDIAN, "byte k must map to bits [8k, 8k+8)");
+    TU w = 0;
+    switch (n_bytes) {
+    case 1:
+        w = p[0];
+        break;
+    case 2: {
+        uint16_t tmp;
+        std::memcpy(&tmp, p, sizeof(tmp));
+        w = tmp;
+        break;
     }
-    return lut;
+    case 4: {
+        uint32_t tmp;
+        std::memcpy(&tmp, p, sizeof(tmp));
+        w = static_cast<TU>(tmp);
+        break;
+    }
+    default:
+        std::memcpy(&w, p, n_bytes);
+        break;
+    }
+    return w;
 }
-constexpr std::array<uint8_t, 256> BIT_REVERSE_LUT = make_bit_reverse_lut();
 
-// Dot product of `lhs` (n_bits lanes) against a bit-packed int8 array of
-// n_bits/8 bytes, where each unpacked lane is implicitly 0 or 1 (as if it
-// had been produced by the ranking expression 'unpack_bits' function).
-// The fast path loads a hardware mask directly from the packed bytes
-// (`hn::LoadMaskBits`, least-significant-bit-first) and selects/accumulates
-// `lhs` with a single vector op per chunk; this is only correct when a
-// vector holds a whole number of bytes' worth of lanes (`Lanes(d) % 8 ==
-// 0`), which always holds for this codebase's x86 targets (AVX2 is the
-// required baseline, giving >=8 f32 lanes and >=8 f64 lanes on AVX3+) but
-// is not guaranteed on every target (e.g. f64 on AVX2 has 4 lanes, NEON
-// f32 has 4 lanes) -- those fall back to the always-correct scalar loop.
+// acc[i] += v[i] for all lanes i where m[i] is set; all other lanes of acc are unchanged.
+template <typename V, typename M> HWY_INLINE V masked_accumulate(V acc, M m, V v) noexcept {
+#if (HWY_TARGET <= HWY_AVX3) || ((HWY_TARGET & HWY_ALL_SVE) != 0)
+    // Targets with dedicated mask/predicate registers can do this as a single merge-masked add.
+    return hn::MaskedAddOr(acc, m, acc, v);
+#else
+    // Otherwise, a blend-based MaskedAddOr costs more than a plain AND+ADD.
+    return hn::Add(acc, hn::IfThenElseZero(m, v));
+#endif
+}
+
+// Dot product of `lhs` (n_bits lanes) against a bit-packed array of n_bits/8 bytes, where
+// each unpacked bit is implicitly 0 or 1 (as if produced by the ranking expression function
+// `unpack_bits`); i.e. the sum of all lhs[i] whose corresponding bit is set.
+//
+// This is "pure" SIMD bit unpacking: no lookup tables, no gathers, no auxiliary data beyond
+// a single loop-invariant vector constant. The packed bytes covered by one vector of lanes
+// are broadcast (as an integer word) to all lanes, and each lane then tests "its" bit in that
+// word with `TestBit` against a per-lane selector constant of the form (1 << bit_pos). The
+// resulting mask selects which lhs lanes to accumulate. The only difference between little
+// (LSB first) and big (MSB first) bit order is the selector constant: lane k tests bit k of
+// the word for little, and bit (k ^ 7), i.e. bit 7 - (k % 8) of byte k / 8, for big. No
+// data-dependent bit reversal is ever needed.
+//
+// Two layouts are handled, depending on how many lanes a vector has for type T:
+//  - At least 8 lanes (all x64 targets for f32, AVX-512 for f64, wide SVE): each vector
+//    consumes lanes/8 whole bytes, and the selector is used as-is.
+//  - Fewer than 8 lanes (f64 on AVX2, f32/f64 on NEON and 128/256-bit SVE): each byte
+//    spans 8/lanes consecutive vectors, which all test the same broadcast byte with the
+//    selector shifted along by `lanes` bits per vector (left for little, right for big).
+// Both are unrolled across 4 independent accumulators to hide FP add latency. Any other
+// (exotic) lane count falls back to an always-correct scalar loop; this never happens on
+// the hardware we target.
+template <bool big_bitorder, typename T>
+    requires(hwy::IsFloat<T>())
+HWY_INLINE double my_hwy_bit_dot_product_impl(const T* HWY_RESTRICT lhs, const uint8_t* HWY_RESTRICT bytes,
+                                              const size_t n_bits) noexcept {
+    using TU = hwy::MakeUnsigned<T>;
+    const hn::ScalableTag<T>                d;
+    const hn::RebindToUnsigned<decltype(d)> du;
+    using V = hn::Vec<decltype(d)>;
+
+    const size_t lanes = hn::Lanes(d);
+    const size_t n_bytes = n_bits / 8;
+
+    // Selector constant: lane k has exactly bit (k) [little] or (k ^ 7) [big] set.
+    const auto iota = hn::Iota(du, 0);
+    const auto bit_pos = big_bitorder ? hn::Xor(iota, hn::Set(du, TU{7})) : iota;
+    const auto sel_base = hn::Shl(hn::Set(du, TU{1}), bit_pos);
+
+    V acc0 = hn::Zero(d);
+    V acc1 = hn::Zero(d);
+    V acc2 = hn::Zero(d);
+    V acc3 = hn::Zero(d);
+
+    if (((lanes % 8) == 0) && ((lanes / 8) <= sizeof(TU))) {
+        // >= 8 lanes per vector; each vector consumes `bpv` whole bytes.
+        const size_t bpv = lanes / 8;
+        auto         step = [&](V& acc, size_t byte_idx) VESPA_HWY_LAMBDA {
+            const auto word = hn::Set(du, load_packed_bytes<TU>(bytes + byte_idx, bpv));
+            const auto mask = hn::RebindMask(d, hn::TestBit(word, sel_base));
+            acc = masked_accumulate(acc, mask, hn::LoadU(d, lhs + (byte_idx * 8)));
+        };
+        size_t byte_idx = 0;
+        for (; (byte_idx + (4 * bpv)) <= n_bytes; byte_idx += 4 * bpv) {
+            step(acc0, byte_idx);
+            step(acc1, byte_idx + bpv);
+            step(acc2, byte_idx + (2 * bpv));
+            step(acc3, byte_idx + (3 * bpv));
+        }
+        for (; (byte_idx + bpv) <= n_bytes; byte_idx += bpv) {
+            step(acc0, byte_idx);
+        }
+        if ((bpv > 1) && (byte_idx < n_bytes)) {
+            // Trailing partial vector; only possible when a vector spans more than one byte.
+            // Bits beyond the end are zero-padded by the word load, so their lanes are never
+            // selected, and the lhs load must not touch memory beyond n_bits.
+            const size_t rem_bytes = n_bytes - byte_idx;
+            const auto   word = hn::Set(du, load_packed_bytes<TU>(bytes + byte_idx, rem_bytes));
+            const auto   mask = hn::RebindMask(d, hn::TestBit(word, sel_base));
+            acc0 = masked_accumulate(acc0, mask, hn::LoadN(d, lhs + (byte_idx * 8), rem_bytes * 8));
+        }
+    } else if ((lanes >= 2) && ((8 % lanes) == 0)) {
+        // < 8 lanes per vector; each byte spans `vpb` consecutive vectors.
+        const size_t vpb = 8 / lanes;
+        auto         step = [&](V& acc, size_t byte_idx, size_t sub) VESPA_HWY_LAMBDA {
+            const auto word = hn::Set(du, static_cast<TU>(bytes[byte_idx]));
+            const int  shift = static_cast<int>(sub * lanes);
+            const auto sel = big_bitorder ? hn::ShiftRightSame(sel_base, shift) : hn::ShiftLeftSame(sel_base, shift);
+            const auto mask = hn::RebindMask(d, hn::TestBit(word, sel));
+            acc = masked_accumulate(acc, mask, hn::LoadU(d, lhs + (byte_idx * 8) + (sub * lanes)));
+        };
+        // Process (at least) 4 vectors per iteration; `bpi` bytes per iteration.
+        const size_t bpi = std::max<size_t>(1, 4 / vpb);
+        V*           accs[4] = {&acc0, &acc1, &acc2, &acc3};
+        size_t       byte_idx = 0;
+        for (; (byte_idx + bpi) <= n_bytes; byte_idx += bpi) {
+            for (size_t b = 0; b < bpi; ++b) {
+                for (size_t sub = 0; sub < vpb; ++sub) {
+                    step(*accs[((b * vpb) + sub) % 4], byte_idx + b, sub);
+                }
+            }
+        }
+        for (; byte_idx < n_bytes; ++byte_idx) {
+            for (size_t sub = 0; sub < vpb; ++sub) {
+                step(*accs[sub % 4], byte_idx, sub);
+            }
+        }
+    } else {
+        // Exotic lane count; neither a multiple nor a divisor of 8. Never the case in practice.
+        T sum = T(0);
+        for (size_t i = 0; i < n_bits; ++i) {
+            const auto byte = static_cast<uint8_t>(bytes[i / 8]);
+            const int  bit_in_byte = big_bitorder ? (7 - static_cast<int>(i % 8)) : static_cast<int>(i % 8);
+            if ((byte >> bit_in_byte) & 1) {
+                sum += lhs[i];
+            }
+        }
+        return static_cast<double>(sum);
+    }
+    return static_cast<double>(hn::ReduceSum(d, hn::Add(hn::Add(acc0, acc1), hn::Add(acc2, acc3))));
+}
+
 template <typename T>
     requires(hwy::IsFloat<T>())
 HWY_INLINE double my_hwy_bit_dot_product(const T* HWY_RESTRICT lhs, const int8_t* HWY_RESTRICT packed_bits,
                                          const size_t n_bits, const bool big_bitorder) noexcept {
-    const hn::ScalableTag<T> d;
-    const size_t             lanes = hn::Lanes(d);
-    const auto*              bytes = reinterpret_cast<const uint8_t*>(packed_bits);
-
-    auto extract_bit = [big_bitorder, bytes](size_t bit_idx) noexcept -> T {
-        uint8_t byte = bytes[bit_idx / 8];
-        int     bit_in_byte = big_bitorder ? (7 - static_cast<int>(bit_idx % 8)) : static_cast<int>(bit_idx % 8);
-        return ((byte >> bit_in_byte) & 1) ? T(1) : T(0);
-    };
-
-    auto   accu = hn::Zero(d);
-    size_t idx = 0;
-    // Generous static upper bound (in bytes) on any realistic hardware
-    // vector lane count for a floating point type. Guarded unconditionally
-    // below (not just via assert()), since a release (NDEBUG) build must
-    // never allow a stack buffer overrun: if the bound is ever exceeded,
-    // the fast loop is simply skipped and everything falls through to the
-    // scalar path.
-    constexpr size_t max_bytes_per_chunk = 32; // covers up to 256 lanes
-    if (((lanes % 8) == 0) && ((lanes / 8) <= max_bytes_per_chunk)) {
-        const size_t bytes_per_chunk = lanes / 8;
-        uint8_t      chunk[max_bytes_per_chunk];
-        for (; idx + lanes <= n_bits; idx += lanes) {
-            const uint8_t* src = bytes + (idx / 8);
-            if (big_bitorder) {
-                for (size_t k = 0; k < bytes_per_chunk; ++k) {
-                    chunk[k] = BIT_REVERSE_LUT[src[k]];
-                }
-            } else {
-                for (size_t k = 0; k < bytes_per_chunk; ++k) {
-                    chunk[k] = src[k];
-                }
-            }
-            const auto mask = hn::LoadMaskBits(d, chunk);
-            const auto lhs_vec = hn::LoadU(d, lhs + idx);
-            accu = hn::Add(accu, hn::IfThenElseZero(mask, lhs_vec));
-        }
-    }
-    // Accumulate the (always < lanes, so negligible) remainder in T rather
-    // than double, matching the precision of the vectorized part above
-    // (and of the old cblas_sdot-based path for T=float) as closely as
-    // possible; only the final sum is widened to double.
-    T scalar_sum = T(0);
-    for (; idx < n_bits; ++idx) {
-        scalar_sum += extract_bit(idx) ? lhs[idx] : T(0);
-    }
-    return static_cast<double>(hn::ReduceSum(d, accu)) + static_cast<double>(scalar_sum);
+    const auto* bytes = reinterpret_cast<const uint8_t*>(packed_bits);
+    return big_bitorder ? my_hwy_bit_dot_product_impl<true>(lhs, bytes, n_bits)
+                        : my_hwy_bit_dot_product_impl<false>(lhs, bytes, n_bits);
 }
 
 template <typename T>
