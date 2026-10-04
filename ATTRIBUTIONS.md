@@ -6,7 +6,7 @@ dependencies of Vespa detected by scanning package manifests.
 For the hand-maintained list of vendored C/C++ libraries (Boost, OpenSSL,
 ICU, etc.), see [`NOTICES`](NOTICES).
 
-Last updated: 2026-09-14
+Last updated: 2026-09-30
 
 ---
 
@@ -162,19 +162,19 @@ Last updated: 2026-09-14
 
 ---
 
-## bigdecimal 4.1.2 — BSD 2
+## bigdecimal 4.1.3 — BSD 2
 
 - Homepage: <https://github.com/ruby/bigdecimal>
 
 ---
 
-## bigdecimal 4.1.2 — Ruby
+## bigdecimal 4.1.3 — Ruby
 
 - Homepage: <https://github.com/ruby/bigdecimal>
 
 ---
 
-## brace-expansion 2.1.4 — MIT
+## brace-expansion 2.1.7 — MIT
 
 - Homepage: <https://github.com/juliangruber/brace-expansion>
 - Copyright 2013 Julian Gruber <julian@juliangruber.com>
@@ -368,9 +368,9 @@ Last updated: 2026-09-14
 
 ---
 
-## github.com/fxamacker/cbor/v2 v2.9.3 — MIT
+## github.com/fxamacker/cbor/v2 v2.9.4 — MIT
 
-- Homepage: <https://pkg.go.dev/github.com/fxamacker/cbor/v2@v2.9.3>
+- Homepage: <https://pkg.go.dev/github.com/fxamacker/cbor/v2@v2.9.4>
 - Copyright 2019-2024 Faye Amacker
 - Copyright 2019 Faye Amacker
 
@@ -767,11 +767,10 @@ Last updated: 2026-09-14
 
 ---
 
-## micromark-util-types 2.0.2 — MIT
+## micromark-util-types 2.0.3 — MIT
 
 - Homepage: <https://github.com/micromark/micromark/tree/main#readme>
 - Copyright Titus Wormer
-- Copyright 2020 Titus Wormer <tituswormer@gmail.com>
 - Copyright Titus Wormer <tituswormer@gmail.com>
 
 ---
@@ -817,6 +816,13 @@ Last updated: 2026-09-14
 ---
 
 ## org.apache.zookeeper 3.9.5 — Apache 2.0
+
+- Homepage: <http://zookeeper.apache.org>
+- The Apache Software Foundation
+
+---
+
+## org.apache.zookeeper 3.9.6 — Apache 2.0
 
 - Homepage: <http://zookeeper.apache.org>
 - The Apache Software Foundation

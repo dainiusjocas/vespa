@@ -42,7 +42,7 @@ import ai.vespa.schemals.parser.ast.indexInsideField;
 import ai.vespa.schemals.parser.ast.indexOutsideDoc;
 import ai.vespa.schemals.parser.ast.INDEX;
 import ai.vespa.schemals.parser.ast.linguisticsElm;
-import ai.vespa.schemals.parser.ast.mapElm;
+import ai.vespa.schemals.parser.ast.fastSearchMapElm;
 import ai.vespa.schemals.parser.ast.onnxModel;
 import ai.vespa.schemals.parser.ast.openLbrace;
 import ai.vespa.schemals.parser.ast.PROFILE;
@@ -238,8 +238,6 @@ public class BodyKeywordCompletion implements CompletionProvider {
 
         put(weightedsetElm.class, FixedKeywordBodies.WEIGHTEDSET.completionItems());
 
-        put(mapElm.class, FixedKeywordBodies.MAP.completionItems());
-
         put(hnswIndex.class, FixedKeywordBodies.HNSW.completionItems());
 
         put(dictionaryElm.class, FixedKeywordBodies.DICTIONARY.completionItems());
@@ -258,12 +256,14 @@ public class BodyKeywordCompletion implements CompletionProvider {
 
     /**
      * Attaches hover documentation to each completion item, looked up by the item label.
+     * The documentation files are named as the labels in upper case, with dashes and spaces replaced by
+     * underscores, as in FAST_SEARCH_MAP_FIELD.md for 'fast-search-map-field'.
      * Returns the same list to allow use in field initializers.
      */
     private static List<CompletionItem> withDocumentation(List<CompletionItem> items) {
         Path schemaHoverPath = SchemaLanguageServer.getDefaultDocumentationPath().resolve("schema");
         for (CompletionItem item : items) {
-            String markdownKey = item.getLabel().toUpperCase(Locale.ROOT).replaceAll("-", "_");
+            String markdownKey = item.getLabel().toUpperCase(Locale.ROOT).replaceAll("[- ]", "_");
             Optional<Hover> hover = SchemaHover.getFileHoverInformation(schemaHoverPath, markdownKey, new Range());
             if (hover.isPresent() && hover.get().getContents().isRight()) {
                 item.setDocumentation(hover.get().getContents().getRight());
@@ -273,41 +273,78 @@ public class BodyKeywordCompletion implements CompletionProvider {
     }
 
     /**
-     * The config model only accepts 'map: fast-search' on maps whose key and value types are among these,
+     * The config model only accepts 'fast-search-map-field' on maps whose key and value types are among these,
      * see CreateFastMapSearch and ConvertParsedFields in config-model.
      */
-    private static final Set<String> FAST_MAP_SEARCH_KEY_VALUE_TYPES = Set.of("string", "int", "long");
+    private static final Set<String> FAST_MAP_SEARCH_KEY_TYPES = Set.of("string", "int", "long");
+    private static final Set<String> FAST_MAP_SEARCH_VALUE_TYPES = Set.of("string", "int", "long", "float", "double");
 
-    /** Snippets for the map settings block, only offered in fields where fast map search is allowed. */
+    private static final String FAST_SEARCH_MAP_FIELD = "fast-search-map-field";
+
+    /** Snippet for the fast-search-map-field statement, only offered in map fields where fast map search is allowed. */
     private static final List<CompletionItem> mapFieldSnippets = withDocumentation(List.of(
-        FixedKeywordBodies.MAP.getColonSnippet(),
-        FixedKeywordBodies.MAP.getBodySnippet()
+        CompletionUtils.constructSnippet(FAST_SEARCH_MAP_FIELD, FAST_SEARCH_MAP_FIELD + " $0", FAST_SEARCH_MAP_FIELD + " name")
     ));
 
-    private static boolean isFastMapSearchKeyValueType(ParsedType type) {
+    /**
+     * Snippet for the fast-search-map-field statement in an array of struct field, where the struct fields
+     * holding the key and the value must be given in its block.
+     */
+    private static final List<CompletionItem> arrayOfStructMapFieldSnippets = withDocumentation(List.of(
+        CompletionUtils.constructSnippet(FAST_SEARCH_MAP_FIELD, FAST_SEARCH_MAP_FIELD + " $1 {\n\tkey: $2\n\tvalue: $3\n}",
+                                         FAST_SEARCH_MAP_FIELD + " name {}")
+    ));
+
+    /** Items inside the fast-search-map-field block of an array of struct field. */
+    private static final List<CompletionItem> arrayOfStructMapBodySnippets = List.of(
+        CompletionUtils.constructSnippet("key", "key: $0", "key:"),
+        CompletionUtils.constructSnippet("value", "value: $0", "value:")
+    );
+
+    private static boolean isFastMapSearchType(ParsedType type, Set<String> allowedTypes) {
         return type != null
             && type.getVariant() == Variant.BUILTIN
-            && FAST_MAP_SEARCH_KEY_VALUE_TYPES.contains(type.name());
+            && allowedTypes.contains(type.name());
     }
 
-    /**
-     * Returns true if the given field element has a map type on which 'map: fast-search' can be set.
-     */
-    private static boolean supportsFastMapSearch(Node fieldNode) {
+    /** Returns the parsed type of the given field element, or null if it has none. */
+    private static ParsedType fieldType(Node fieldNode) {
         for (Node child : fieldNode) {
             if (!child.isASTInstance(dataType.class)) {
                 continue;
             }
             if (!(child.getSchemaNode().getOriginalSchemaNode() instanceof dataType typeNode)) {
-                return false;
+                return null;
             }
-            ParsedType type = typeNode.getParsedType();
-            if (type == null || type.getVariant() != Variant.MAP) {
-                return false;
-            }
-            return isFastMapSearchKeyValueType(type.mapKeyType()) && isFastMapSearchKeyValueType(type.mapValueType());
+            return typeNode.getParsedType();
         }
-        return false;
+        return null;
+    }
+
+    /**
+     * Returns true if the given field element has a map type on which 'fast-search-map-field' can be set.
+     */
+    private static boolean supportsFastMapSearch(Node fieldNode) {
+        ParsedType type = fieldType(fieldNode);
+        if (type == null || type.getVariant() != Variant.MAP) {
+            return false;
+        }
+        return isFastMapSearchType(type.mapKeyType(), FAST_MAP_SEARCH_KEY_TYPES)
+            && isFastMapSearchType(type.mapValueType(), FAST_MAP_SEARCH_VALUE_TYPES);
+    }
+
+    /**
+     * Returns true if the given field element is an array of struct, on which 'fast-search-map-field' with
+     * 'key' and 'value' can be set. A struct is referenced by name, which is not resolved to a struct at this point,
+     * so any array of a type which is not built in is taken to be an array of struct.
+     */
+    private static boolean isArrayOfStruct(Node fieldNode) {
+        ParsedType type = fieldType(fieldNode);
+        if (type == null || type.getVariant() != Variant.ARRAY) {
+            return false;
+        }
+        Variant nested = type.nestedType().getVariant();
+        return nested == Variant.STRUCT || nested == Variant.UNKNOWN;
     }
 
     private static final String TOKENS_MODE_CHOICE = "${1|original,first-alternative,alternatives,original-and-alternatives|}";
@@ -382,12 +419,26 @@ public class BodyKeywordCompletion implements CompletionProvider {
 
         if (searchNode.isASTInstance(linguisticsElm.class)) return linguisticsCompletionItems(searchNode, searchPos);
 
+        if (searchNode.isASTInstance(fastSearchMapElm.class)) {
+            Node fieldNode = searchNode.getParent();
+            while (fieldNode != null && !fieldNode.isASTInstance(fieldElm.class)) {
+                fieldNode = fieldNode.getParent();
+            }
+            // The key and value of a map are always named key and value, so there is nothing to suggest.
+            return (fieldNode != null && isArrayOfStruct(fieldNode)) ? arrayOfStructMapBodySnippets : List.of();
+        }
+
         List<CompletionItem> result = bodyKeywordSnippets.get(searchNode.getASTClass());
         if (result == null) return List.of();
 
         if (searchNode.isASTInstance(fieldElm.class) && supportsFastMapSearch(searchNode)) {
             List<CompletionItem> withMap = new ArrayList<>(result);
             withMap.addAll(mapFieldSnippets);
+            return withMap;
+        }
+        if (searchNode.isASTInstance(fieldElm.class) && isArrayOfStruct(searchNode)) {
+            List<CompletionItem> withMap = new ArrayList<>(result);
+            withMap.addAll(arrayOfStructMapFieldSnippets);
             return withMap;
         }
         return result;

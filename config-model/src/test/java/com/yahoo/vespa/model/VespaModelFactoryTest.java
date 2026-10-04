@@ -5,7 +5,8 @@ import com.yahoo.component.Version;
 import com.yahoo.config.application.api.ApplicationPackage;
 import com.yahoo.component.ComponentId;
 import com.yahoo.component.provider.ComponentRegistry;
-import com.yahoo.config.model.api.CommerceDiscoverySchemaProvider;
+import com.yahoo.config.model.api.AdditionalContent;
+import com.yahoo.config.model.api.CommerceDiscoveryProvider;
 import com.yahoo.config.provision.Zone;
 import com.yahoo.config.model.MockModelContext;
 import com.yahoo.config.model.api.ApplicationClusterEndpoint;
@@ -37,6 +38,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -58,7 +60,7 @@ public class VespaModelFactoryTest {
         VespaModelFactory modelFactory =  VespaModelFactory.createTestFactory();
         Model model = modelFactory.createModel(testModelContext);
         assertNotNull(model);
-        assertTrue(model instanceof VespaModel);
+        assertInstanceOf(VespaModel.class, model);
     }
 
     // Uses an application package that throws IllegalArgumentException when validating
@@ -162,22 +164,22 @@ public class VespaModelFactoryTest {
         assertTrue(exception.getMessage().contains("requires Vespa Cloud"), exception.getMessage());
     }
 
-    /** Lock in feature flag and hosted as gating for schema providers for now. */
+    /** Lock in feature flag and hosted as gating for the provider for now. */
     @Test
-    void commerceDiscoverySchemaProviderIsConsultedOnlyInHostedVespaWithTheFlagEnabled() {
-        assertFalse(schemaProviderConsulted(false, false));
-        assertFalse(schemaProviderConsulted(true, false));
-        assertFalse(schemaProviderConsulted(false, true));
-        assertTrue(schemaProviderConsulted(true, true));
+    void commerceDiscoveryProviderIsConsultedOnlyInHostedVespaWithTheFlagEnabled() {
+        assertFalse(providerConsulted(false, false));
+        assertFalse(providerConsulted(true, false));
+        assertFalse(providerConsulted(false, true));
+        assertTrue(providerConsulted(true, true));
     }
 
-    private boolean schemaProviderConsulted(boolean hostedVespa, boolean flagEnabled) {
+    private boolean providerConsulted(boolean hostedVespa, boolean flagEnabled) {
         AtomicBoolean consulted = new AtomicBoolean(false);
-        CommerceDiscoverySchemaProvider provider = applicationPackage -> {
+        CommerceDiscoveryProvider provider = applicationPackage -> {
             consulted.set(true);
-            return List.of();
+            return AdditionalContent.none();
         };
-        var providers = new ComponentRegistry<CommerceDiscoverySchemaProvider>();
+        var providers = new ComponentRegistry<CommerceDiscoveryProvider>();
         providers.register(ComponentId.fromString("test-provider"), provider);
         var factory = new VespaModelFactory(new ComponentRegistry<>(), new ComponentRegistry<>(),
                                             new ComponentRegistry<>(), providers, Zone.defaultZone());
@@ -203,7 +205,7 @@ public class VespaModelFactoryTest {
         }
 
         @Override
-        public List<HostSpec> prepare(ClusterSpec cluster, Capacity capacity, ProvisionContext context) {
+        public List<HostSpec> prepare(ClusterSpec cluster, ProvisionContext context) {
             return hosts;
         }
 

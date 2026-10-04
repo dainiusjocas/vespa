@@ -891,6 +891,19 @@
     ],
     "fields" : [ ]
   },
+  "com.yahoo.prelude.query.Items" : {
+    "superClass" : "java.lang.Object",
+    "interfaces" : [ ],
+    "attributes" : [
+      "public"
+    ],
+    "methods" : [
+      "public void <init>()",
+      "public static com.yahoo.prelude.query.Item text(java.lang.String, java.lang.String, com.yahoo.search.Query, com.yahoo.search.searchchain.Execution)",
+      "public static com.yahoo.prelude.query.Item text(java.lang.String, java.lang.String, com.yahoo.search.query.QueryType, com.yahoo.language.Language, java.util.Set, java.util.Set, com.yahoo.search.query.parser.ParserEnvironment)"
+    ],
+    "fields" : [ ]
+  },
   "com.yahoo.prelude.query.LabelWrapperItem" : {
     "superClass" : "com.yahoo.prelude.query.CompositeTaggableItem",
     "interfaces" : [ ],
@@ -937,6 +950,42 @@
       "public static final com.yahoo.prelude.query.Limit NEGATIVE_INFINITY",
       "public static final com.yahoo.prelude.query.Limit POSITIVE_INFINITY"
     ]
+  },
+  "com.yahoo.prelude.query.MapMatchItem" : {
+    "superClass" : "com.yahoo.prelude.query.NonReducibleCompositeItem",
+    "interfaces" : [
+      "com.yahoo.prelude.query.HasIndexItem"
+    ],
+    "attributes" : [
+      "public"
+    ],
+    "methods" : [
+      "public void <init>(java.lang.String, com.yahoo.prelude.query.Item, com.yahoo.prelude.query.Item)",
+      "public com.yahoo.prelude.query.Item keyItem()",
+      "public com.yahoo.prelude.query.Item valueItem()",
+      "public java.lang.String getFieldName()",
+      "public java.lang.String getIndexName()",
+      "public void setIndexName(java.lang.String)",
+      "public int getNumWords()",
+      "public com.yahoo.prelude.query.Item$ItemType getItemType()",
+      "public java.lang.String getName()",
+      "public void addItem(com.yahoo.prelude.query.Item)",
+      "public void addItem(int, com.yahoo.prelude.query.Item)",
+      "public com.yahoo.prelude.query.Item removeItem(int)",
+      "public boolean removeItem(com.yahoo.prelude.query.Item)",
+      "public java.util.ListIterator getItemIterator()",
+      "protected void encodeThis(java.nio.ByteBuffer, com.yahoo.prelude.query.SerializationContext)",
+      "protected void appendHeadingString(java.lang.StringBuilder)",
+      "protected void appendBodyString(java.lang.StringBuilder)",
+      "public com.yahoo.prelude.query.MapMatchItem clone()",
+      "public boolean equals(java.lang.Object)",
+      "public int hashCode()",
+      "public void disclose(com.yahoo.prelude.query.textualrepresentation.Discloser)",
+      "public bridge synthetic com.yahoo.prelude.query.CompositeItem clone()",
+      "public bridge synthetic com.yahoo.prelude.query.Item clone()",
+      "public bridge synthetic java.lang.Object clone()"
+    ],
+    "fields" : [ ]
   },
   "com.yahoo.prelude.query.MarkerWordItem" : {
     "superClass" : "com.yahoo.prelude.query.WordItem",
@@ -9219,8 +9268,31 @@
       "public com.yahoo.search.schema.Field$Builder setAttribute(boolean)",
       "public com.yahoo.search.schema.Field$Builder setIndex(boolean)",
       "public com.yahoo.search.schema.Field$Builder setBitPacked(boolean)",
-      "public com.yahoo.search.schema.Field$Builder setFastMapSearch(boolean)",
+      "public com.yahoo.search.schema.Field$Builder addFastMapSearch(java.lang.String)",
+      "public com.yahoo.search.schema.Field$Builder addFastMapSearch(com.yahoo.search.schema.Field$FastMapSearchFields)",
       "public com.yahoo.search.schema.Field build()"
+    ],
+    "fields" : [ ]
+  },
+  "com.yahoo.search.schema.Field$FastMapSearchFields" : {
+    "superClass" : "java.lang.Record",
+    "interfaces" : [ ],
+    "attributes" : [
+      "public",
+      "final",
+      "record"
+    ],
+    "methods" : [
+      "public void <init>(java.lang.String, java.lang.String, com.yahoo.search.schema.Field$Type, java.lang.String, com.yahoo.search.schema.Field$Type)",
+      "public static com.yahoo.search.schema.Field$FastMapSearchFields of(java.lang.String, com.yahoo.search.schema.Field$MapFieldType)",
+      "public final java.lang.String toString()",
+      "public final int hashCode()",
+      "public final boolean equals(java.lang.Object)",
+      "public java.lang.String lookupName()",
+      "public java.lang.String keyField()",
+      "public com.yahoo.search.schema.Field$Type keyType()",
+      "public java.lang.String valueField()",
+      "public com.yahoo.search.schema.Field$Type valueType()"
     ],
     "fields" : [ ]
   },
@@ -9234,6 +9306,8 @@
       "public void <init>(com.yahoo.search.schema.Field$Type, com.yahoo.search.schema.Field$Type)",
       "public com.yahoo.search.schema.Field$Type keyType()",
       "public com.yahoo.search.schema.Field$Type valueType()",
+      "public boolean equals(java.lang.Object)",
+      "public int hashCode()",
       "public static com.yahoo.search.schema.Field$Type from(java.lang.String)"
     ],
     "fields" : [ ]
@@ -9247,6 +9321,8 @@
     "methods" : [
       "public void <init>(com.yahoo.tensor.TensorType)",
       "public com.yahoo.tensor.TensorType tensorType()",
+      "public boolean equals(java.lang.Object)",
+      "public int hashCode()",
       "public java.lang.String toString()"
     ],
     "fields" : [ ]
@@ -9292,6 +9368,8 @@
     ],
     "methods" : [
       "public com.yahoo.search.schema.Field$Type$Kind kind()",
+      "public boolean equals(java.lang.Object)",
+      "public int hashCode()",
       "public java.lang.String toString()",
       "public static com.yahoo.search.schema.Field$Type from(java.lang.String)"
     ],
@@ -9313,6 +9391,8 @@
       "public boolean isAttribute()",
       "public boolean isIndex()",
       "public boolean hasFastMapSearch()",
+      "public java.util.List fastMapSearches()",
+      "public java.util.Optional fastMapSearch(java.lang.String)",
       "public boolean equals(java.lang.Object)",
       "public int hashCode()",
       "public java.lang.String toString()"
@@ -10138,6 +10218,24 @@
       "public int getTo()"
     ],
     "fields" : [ ]
+  },
+  "ai.vespa.search.counting.FilterIntersectionsSearcher" : {
+    "superClass" : "com.yahoo.search.Searcher",
+    "interfaces" : [ ],
+    "attributes" : [
+      "public"
+    ],
+    "methods" : [
+      "public void <init>()",
+      "public com.yahoo.search.Result search(com.yahoo.search.Query, com.yahoo.search.searchchain.Execution)"
+    ],
+    "fields" : [
+      "public static final com.yahoo.processing.request.CompoundName PARAM_FILTERS",
+      "public static final com.yahoo.processing.request.CompoundName PARAM_SEPARATOR",
+      "public static final com.yahoo.processing.request.CompoundName PARAM_DIMENSIONS",
+      "public static final com.yahoo.processing.request.CompoundName PARAM_MAX_CELLS",
+      "public static final int DEFAULT_MAX_CELLS"
+    ]
   },
   "ai.vespa.search.llm.LLMSearcher" : {
     "superClass" : "com.yahoo.search.Searcher",

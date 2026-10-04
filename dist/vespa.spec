@@ -33,7 +33,7 @@
 %define _defattr_is_vespa_vespa 0
 %define _command_cmake cmake
 %global _vespa_abseil_cpp_version 20250127.1
-%global _vespa_build_depencencies_version 1.19.0
+%global _vespa_build_depencencies_version 1.20.0
 %global _vespa_gtest_version 1.16.0
 %global _vespa_protobuf_version 6.34.1
 %global _vespa_openblas_version 0.3.27
@@ -44,6 +44,7 @@
 %global _vespa_icu_version 78.3.0
 %global _vespa_re2_version 20251105
 %global _vespa_xxhash_version 0.8.1
+%global _vespa_openssl_version 3.5.9
 %if 0%{?el8} || 0%{?el9} || 0%{?amzn2023}
 %global _use_vespa_abseil_cpp 1
 %global _vespa_abseil_excludes |absl_[a-z_0-9]*
@@ -55,14 +56,11 @@
 %global _use_vespa_openblas 1
 %global _vespa_openblas_excludes |openblas
 
-%if 0%{?fedora}
-%if %{fedora} > 43
+%if 0%{?fedora} && ! 0%{?amzn2023} && ! 0%{?amzn2027}
 %global _vespa_java_version 25
-%else
-%if %{fedora} > 39
-%global _vespa_java_version 21
 %endif
-%endif
+%if 0%{?amzn2027}
+%global _vespa_java_version 25
 %endif
 %if 0%{?el10}
 %global _vespa_java_version 25
@@ -135,14 +133,22 @@ Requires: zstd
 %if 0%{?el9}
 %global _centos_stream %(grep -qs '^NAME="CentOS Stream"' /etc/os-release && echo 1 || echo 0)
 %define _devtoolset_enable /opt/rh/gcc-toolset/enable
+
+%global _use_vespa_openssl 1
+%global _vespa_openssl_excludes |crypto|ssl
 %endif
 
 %if 0%{?el10}
 %define _devtoolset_enable /opt/rh/gcc-toolset/enable
+
+%global _use_vespa_openssl 1
+%global _vespa_openssl_excludes |crypto|ssl
 %endif
 
+%if 0%{?amzn2023} || 0%{?amzn2027}
+%global _java_home /usr/lib/jvm/java-%{_vespa_java_version}-amazon-corretto
+%endif
 %if 0%{?amzn2023}
-%global _java_home /usr/lib/jvm/java-17-amazon-corretto
 %global _use_vespa_xxhash 1
 %global _vespa_xxhash_excludes |xxhash
 
@@ -186,9 +192,9 @@ Vespa - The open big data serving engine
 
 Summary: Vespa - The open big data serving engine - base
 
-%if 0%{?amzn2023}
-Requires: java-17-amazon-corretto-devel
-Requires: java-17-amazon-corretto
+%if 0%{?amzn2023} || 0%{?amzn2027}
+Requires: java-%{_vespa_java_version}-amazon-corretto-devel
+Requires: java-%{_vespa_java_version}-amazon-corretto
 %else
 Requires: java-%{_vespa_java_version}-openjdk-devel
 %endif
@@ -207,15 +213,13 @@ Requires: vespa-xxhash >= 0.8.1
 %else
 Requires: xxhash-libs >= 0.8.1
 %endif
-%if 0%{?el8}
-Requires: vespa-openssl >= 3.5.4
+%if 0%{?el8} || 0%{?el9} || 0%{?el10}
+Requires: vespa-openssl >= %{_vespa_openssl_version}
 %else
 Requires: openssl-libs
 %endif
 Requires: vespa-lz4 >= 1.9.4-1
 Requires: vespa-libzstd >= 1.5.6-1
-%if 0%{?amzn2023}
-%endif
 %if 0%{?el8} || 0%{?el9} || 0%{?el10} || 0%{?fedora}
 Requires: glibc-langpack-en
 %endif
@@ -242,8 +246,8 @@ Requires: vespa-re2 = %{_vespa_re2_version}
 Requires: re2
 %endif
 
-%if 0%{?el8}
-Requires: vespa-openssl >= 3.5.4
+%if 0%{?el8} || 0%{?el9} || 0%{?el10}
+Requires: vespa-openssl >= %{_vespa_openssl_version}
 %else
 Requires: openssl-libs
 %endif
@@ -342,8 +346,8 @@ BuildArch: noarch
 # Self-contained: the fat JAR bundles all provided-scope deps, so no Vespa install is required.
 # Mirrors the java requirement conditional in %package base, but pulls the headless runtime
 # instead of the full JDK since this is a runtime-only CLI.
-%if 0%{?amzn2023}
-Requires: java-17-amazon-corretto-headless
+%if 0%{?amzn2023} || 0%{?amzn2027}
+Requires: java-%{_vespa_java_version}-amazon-corretto-headless
 %else
 Requires: java-%{_vespa_java_version}-openjdk-headless
 %endif
@@ -415,7 +419,7 @@ export PATH="%{_prefix}-deps/bin:$PATH"
        %{?_cmake_extra_opts} \
        .
 
-make %{_smp_mflags}
+make --no-print-directory %{_smp_mflags}
 VERSION=%{version} CI=true make -C client/go install-all
 %endif
 
@@ -428,7 +432,7 @@ export JAVA_HOME=/usr/lib/jvm/java-%{_vespa_java_version}-openjdk
 %endif
 export PATH="$JAVA_HOME/bin:$PATH"
 LC_CTYPE=C.UTF-8 %{_mvn_cmd} --batch-mode -nsu -T 1C verify
-make test ARGS="--output-on-failure %{_smp_mflags}"
+make --no-print-directory test ARGS="--output-on-failure %{_smp_mflags}"
 %endif
 
 %install
@@ -440,7 +444,7 @@ cp -r %{installdir} %{buildroot}
 find %{buildroot} -exec file {} \; | grep ': ELF ' | cut -d: -f1 | xargs --no-run-if-empty -n1 /usr/lib/rpm/debugedit -b %{source_base} -d %{_builddir}/%{name}-%{version}
 %endif
 %else
-make install DESTDIR=%{buildroot}
+make --no-print-directory install DESTDIR=%{buildroot}
 cp client/go/bin/vespa %{buildroot}%{_prefix}/bin/vespa
 mkdir -p %{buildroot}/usr/share
 cp -a client/go/share/* %{buildroot}/usr/share

@@ -2,6 +2,7 @@
 package com.yahoo.search.yql;
 
 import com.yahoo.language.Language;
+import com.yahoo.language.process.LinguisticsParameters;
 import com.yahoo.language.simple.SimpleToken;
 import com.yahoo.prelude.Index;
 import com.yahoo.prelude.IndexFacts;
@@ -102,6 +103,15 @@ public class TextInputTestCase {
         var tester = new LinguisticsParserTester();
         Item root = tester.parse("select foo from bar where title contains ({language:\"ja\"} text(\"\u30ab\u30bf\u30ab\u30ca\"))").getRoot();
         assertEquals(Language.JAPANESE, root.getLanguage());
+    }
+
+    @Test
+    void languageAnnotationIsPassedToTheTokenizer() {
+        var tester = new LinguisticsParserTester();
+        tester.parse("select foo from bar where title contains ({language:\"ja\"} text(\"\u30ab\u30bf\u30ab\u30ca\"))");
+        assertEquals(List.of(Language.JAPANESE),
+                     tester.tokenizer().invocations().stream().map(LinguisticsParameters::language).toList(),
+                     "The language of the query is what decides which analyzer the linguistics component uses");
     }
 
     @Test
@@ -266,6 +276,39 @@ public class TextInputTestCase {
                                                                             SimpleToken.fromStems("d", List.of("d1", "d2")));
         tester.assertParsed("AND (OR field1:a WORD_ALTERNATIVES field2:[ c1(1.0) c2(1.0) ]) WORD_ALTERNATIVES field2:[ d1(1.0) d2(1.0) ]",
                             "select * from schema1 where fieldSet1 contains ({grammar.composite:'and'}text('query text'))");
+
+        // Skipped tokens: The first profile combines the input into a single token which covers the meaning of both
+        tester.tokenizer().putTokens("profile1", "the text", SimpleToken.fromStems("the text", List.of("txt"))
+                                                                                     .setPositionIncrement(2));
+        tester.tokenizer().putTokens("profile2", "the text", "the", "text");
+        tester.assertParsed("AND field2:the (OR field1:txt field2:text)",
+                            "select * from schema1 where fieldSet1 contains ({grammar.composite:'and'}text('the text'))");
+
+        // Skipped tokens with more complexity
+        tester.tokenizer().putTokens("profile1", "query the text", SimpleToken.fromStems("query", List.of("q1", "q2")),
+                                                                                SimpleToken.fromStems("the text", List.of("txt"))
+                                                                                           .setPositionIncrement(2));
+        tester.tokenizer().putTokens("profile2", "query the text", SimpleToken.fromStems("query", List.of("qu")),
+                                                                                SimpleToken.fromStems("the", List.of("the", "tze")),
+                                                                                SimpleToken.fromStems("text", List.of("t")));
+        tester.assertParsed("AND (OR WORD_ALTERNATIVES field1:[ q1(1.0) q2(1.0) ] field2:qu) WORD_ALTERNATIVES field2:[ the(1.0) tze(1.0) ] (OR field1:txt field2:t)",
+                            "select * from schema1 where fieldSet1 contains ({grammar.composite:'and'}text('query the text'))");
+
+        // Skipped tokens in all tokenizers
+        tester.tokenizer().putTokens("profile1", "the text", SimpleToken.fromStems("the text", List.of("txt"))
+                                                                        .setPositionIncrement(2));
+        tester.tokenizer().putTokens("profile2", "the text", SimpleToken.fromStems("the text", List.of("text"))
+                                                                        .setPositionIncrement(2));
+        tester.assertParsed("AND (OR field1:txt field2:text)",
+                            "select * from schema1 where fieldSet1 contains ({grammar.composite:'and'}text('the text'))");
+
+        // Skip beyond input length
+        tester.tokenizer().putTokens("profile1", "the text", SimpleToken.fromStems("the text", List.of("txt"))
+                                                                        .setPositionIncrement(2));
+        tester.tokenizer().putTokens("profile2", "the text", SimpleToken.fromStems("the text", List.of("text"))
+                                                                        .setPositionIncrement(3));
+        tester.assertParsed("AND field1:txt field2:text",
+                            "select * from schema1 where fieldSet1 contains ({grammar.composite:'and'}text('the text'))");
     }
 
 }

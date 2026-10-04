@@ -57,7 +57,7 @@ public class LSPTest {
     /**
      * Uses a hand-crafted file to test some go-to-definition requests.
      * If this test fails, check
-     * - That the file src/test/sdfiles/single/definition.sd has not been changed. 
+     * - That the file src/test/sdfiles/single/definition.sd has not been changed.
      * - Go to definition code in {@link SchemaDefinition#getDefinition}
      * - Symbol definition logic in {@link IdentifySymbolDefinition#identify}
      * - Symbol reference logic in {@link IdentifySymbolReferences#identify}
@@ -100,12 +100,12 @@ public class LSPTest {
                 schemaIndex,
                 messageHandler,
                 document.getVersionedTextDocumentIdentifier(),
-                startPos 
+                startPos
             );
             List<Location> result = SchemaDefinition.getDefinition(definitionContext);
             assertEquals(1, result.size(), "Definition request should return exactly 1 result for position " + startPos.toString());
 
-            assertEquals(testPair.getSecond(), result.get(0).getRange(), 
+            assertEquals(testPair.getSecond(), result.get(0).getRange(),
                 "Definition request returned wrong range for position " + startPos.toString());
         }
     }
@@ -151,8 +151,10 @@ public class LSPTest {
     }
 
     /**
-     * 'map: fast-search' is only accepted by the config model on maps with string, int or long keys and values,
-     * so {@link BodyKeywordCompletion} should only suggest the map block in such fields.
+     * 'fast-search-map-field' is only accepted by the config model on maps with
+     * string, int or long keys and string, int, long, float or double values,
+     * or on arrays of struct, so {@link BodyKeywordCompletion} should only suggest it in
+     * such fields.
      */
     @Test
     void mapFastSearchCompletionTest() throws IOException, InvalidContextException {
@@ -174,27 +176,34 @@ public class LSPTest {
         DocumentManager document = scheduler.getDocument(fileURI);
 
         // Positions are 0-indexed and point at the empty line inside the given field body.
-        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(4, 12)).contains("map"),
-                   "map should be suggested in a map<string, string> field.");
-        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(8, 12)).contains("map"),
-                   "map should be suggested in a map<string, int> field.");
-        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(12, 12)).contains("map"),
-                   "map should be suggested in a map<string, long> field.");
-        assertFalse(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(16, 12)).contains("map"),
-                    "map should not be suggested in a string field.");
-        assertFalse(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(20, 12)).contains("map"),
-                    "map should not be suggested in an array<string> field.");
-        assertEquals(List.of("fast-search"), completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(24, 17)),
-                     "fast-search should be the only suggestion after 'map: '.");
-        assertEquals(List.of("fast-search"), completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(29, 16)),
-                     "fast-search should be the only suggestion inside a map block.");
-        assertFalse(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(34, 12)).contains("map"),
-                    "map should not be suggested in a map<string, double> field.");
+        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(4, 12)).contains("fast-search-map-field"),
+                   "fast-search-map-field should be suggested in a map<string, string> field.");
+        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(8, 12)).contains("fast-search-map-field"),
+                   "fast-search-map-field should be suggested in a map<string, int> field.");
+        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(12, 12)).contains("fast-search-map-field"),
+                   "fast-search-map-field should be suggested in a map<string, long> field.");
+        assertFalse(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(16, 12)).contains("fast-search-map-field"),
+                    "fast-search-map-field should not be suggested in a string field.");
+        assertFalse(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(20, 12)).contains("fast-search-map-field"),
+                    "fast-search-map-field should not be suggested in an array<string> field.");
+        assertEquals(List.of(), completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(29, 16)),
+                     "Nothing should be suggested inside the fast-search-map-field block of a map, whose key and value are fixed.");
+        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(34, 12)).contains("fast-search-map-field"),
+                   "fast-search-map-field should be suggested in a map<string, double> field.");
+        assertFalse(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(38, 12)).contains("fast-search-map-field"),
+                    "fast-search-map-field should not be suggested in a map<double, string> field.");
+        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(46, 12)).contains("fast-search-map-field"),
+                   "fast-search-map-field should be suggested in an array of struct field.");
+        assertEquals(List.of("key", "value"),
+                     completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(51, 16)),
+                     "key and value should be suggested inside the fast-search-map-field block of an array of struct field.");
+        assertTrue(completionLabelsAt(scheduler, schemaIndex, messageHandler, document, new Position(56, 12)).contains("fast-search-map-field"),
+                   "fast-search-map-field should be suggested in a map<int, string> field.");
     }
 
     /**
-     * 'map' is both a type constructor and the keyword opening a map settings block.
-     * It should be colored as a type in the former case and as a keyword in the latter.
+     * 'map' in a field type should be colored as a type,
+     * and 'fast-search-map-field' should be colored as a keyword.
      */
     @Test
     void mapSemanticTokenTest() throws IOException, InvalidContextException {
@@ -217,15 +226,14 @@ public class LSPTest {
         EventDocumentContext context = new EventDocumentContext(scheduler, schemaIndex, messageHandler, new TextDocumentIdentifier(fileURI));
         List<Integer> data = SchemaSemanticTokens.getSemanticTokens(context).getData();
 
-        // Positions are 0-indexed: the 'map' of 'type map<string, string>' on line 2 and of 'map: fast-search' on line 24.
+        // Positions are 0-indexed: the 'map' of 'type map<string, string>' on line 2,
+        // and 'fast-search-map-field lookup' on lines 24 and 28.
         assertEquals(List.of("type"), semanticTokenTypesAt(data, legend, new Position(2, 33)),
                      "map in a field type should be colored as a type.");
         assertEquals(List.of("keyword"), semanticTokenTypesAt(data, legend, new Position(24, 12)),
-                     "map opening a map settings block should be colored as a keyword.");
+                     "fast-search-map-field should be colored as a keyword.");
         assertEquals(List.of("keyword"), semanticTokenTypesAt(data, legend, new Position(28, 12)),
-                     "map opening a map settings block should be colored as a keyword.");
-        assertEquals(List.of("keyword"), semanticTokenTypesAt(data, legend, new Position(24, 17)),
-                     "fast-search in a map settings block should be colored as a keyword.");
+                     "fast-search-map-field with a block should be colored as a keyword.");
     }
 
     /** Decodes the delta-encoded semantic token data and returns the type names of the tokens starting at the given position. */

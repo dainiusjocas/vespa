@@ -41,14 +41,17 @@ import com.yahoo.prelude.query.CompositeItem;
 import com.yahoo.prelude.query.DocumentFrequency;
 import com.yahoo.prelude.query.DotProductItem;
 import com.yahoo.prelude.query.EquivItem;
+import com.yahoo.prelude.query.ExactStringItem;
 import com.yahoo.prelude.query.FalseItem;
 import com.yahoo.prelude.query.FuzzyItem;
-import com.yahoo.prelude.query.ExactStringItem;
-import com.yahoo.prelude.query.IntItem;
-import com.yahoo.prelude.query.LabelWrapperItem;
-import com.yahoo.prelude.query.Item;
-import com.yahoo.prelude.query.Limit;
 import com.yahoo.prelude.query.GeoLocationItem;
+import com.yahoo.prelude.query.HasIndexItem;
+import com.yahoo.prelude.query.IntItem;
+import com.yahoo.prelude.query.Item;
+import com.yahoo.prelude.query.Items;
+import com.yahoo.prelude.query.LabelWrapperItem;
+import com.yahoo.prelude.query.Limit;
+import com.yahoo.prelude.query.MapMatchItem;
 import com.yahoo.prelude.query.NearItem;
 import com.yahoo.prelude.query.NearestNeighborItem;
 import com.yahoo.prelude.query.NotItem;
@@ -101,7 +104,6 @@ import com.yahoo.search.query.Sorting.UcaSorter;
 import com.yahoo.search.query.parser.Parsable;
 import com.yahoo.search.query.parser.Parser;
 import com.yahoo.search.query.parser.ParserEnvironment;
-import com.yahoo.search.query.parser.ParserFactory;
 
 /**
  * The YQL query language.
@@ -110,6 +112,7 @@ import com.yahoo.search.query.parser.ParserFactory;
  * Adding anything here will usually require a corresponding addition in
  * VespaSerializer.
  *
+ * @author bratseth
  * @author Steinar Knutsen
  * @author Stian Kristoffersen
  * @author Simon Thoresen Hult
@@ -131,7 +134,6 @@ public class YqlParser implements Parser {
 
     private static final Integer DEFAULT_HITS = 10;
     private static final Integer DEFAULT_OFFSET = 0;
-    public static final Integer DEFAULT_WAND_TARGET_HITS = 10;
     private static final String ACCENT_DROP_DESCRIPTION = "setting for whether to remove accents if field implies it";
     public static final String ANNOTATIONS = "annotations";
     private static final String FILTER_DESCRIPTION = "term filter setting";
@@ -160,6 +162,8 @@ public class YqlParser implements Parser {
     private static final String NON_EMPTY = "nonEmpty";
     public static final String START_ANCHOR = "startAnchor";
     public static final String END_ANCHOR = "endAnchor";
+    public static final String KEY_FIELD_NAME = "key";
+    public static final String VALUE_FIELD_NAME = "value";
 
     public static final String SORTING_FUNCTION = "function";
     public static final String SORTING_LOCALE = "locale";
@@ -216,6 +220,7 @@ public class YqlParser implements Parser {
     public static final String RANK = "rank";
     public static final String RANKED = "ranked";
     public static final String SAME_ELEMENT = "sameElement";
+    public static final String MAP_MATCH = "mapMatch";
     public static final String SCORE_THRESHOLD = "scoreThreshold";
     public static final String SIGNIFICANCE = "significance";
     public static final String STEM = "stem";
@@ -259,6 +264,7 @@ public class YqlParser implements Parser {
     private Integer offset;
     private Integer timeout;
     private Query userQuery;
+    private ParameterResolver parameters;
     private Parsable currentlyParsing;
     private IndexFacts.Session indexFactsSession;
     private IndexNameExpander indexNameExpander = new IndexNameExpander();
@@ -338,6 +344,7 @@ public class YqlParser implements Parser {
         Item root = convertExpression(filterExpression, null);
         connectItems();
         userQuery = null;
+        parameters = null;
         return new QueryTree(root);
     }
 
@@ -486,15 +493,15 @@ public class YqlParser implements Parser {
             throw newUnexpectedArgumentException(key.getOperator(), ExpressionOperator.LITERAL);
         }
 
-        OperatorNode<ExpressionOperator> keyMatch = makeMapComponentMatch("key", key);
-        OperatorNode<ExpressionOperator> valueMatch = makeMapComponentMatch("value", value);
-        OperatorNode<ExpressionOperator> sameElement = OperatorNode.create(
+        OperatorNode<ExpressionOperator> keyMatch = makeMapComponentMatch(KEY_FIELD_NAME, key);
+        OperatorNode<ExpressionOperator> valueMatch = makeMapComponentMatch(VALUE_FIELD_NAME, value);
+        OperatorNode<ExpressionOperator> mapMatch = OperatorNode.create(
                 ast.getLocation(),
                 ExpressionOperator.CALL,
-                List.of(SAME_ELEMENT),
+                List.of(MAP_MATCH),
                 List.of(keyMatch, valueMatch));
 
-        return OperatorNode.create(ast.getLocation(), ExpressionOperator.CONTAINS, field, sameElement);
+        return OperatorNode.create(ast.getLocation(), ExpressionOperator.CONTAINS, field, mapMatch);
     }
 
     /**
@@ -528,16 +535,16 @@ public class YqlParser implements Parser {
             throw newUnexpectedArgumentException(key.getOperator(), ExpressionOperator.LITERAL);
         }
 
-        var valueField = OperatorNode.create(mapRef.getLocation(), ExpressionOperator.READ_FIELD, "", "value");
+        var valueField = OperatorNode.create(mapRef.getLocation(), ExpressionOperator.READ_FIELD, "", VALUE_FIELD_NAME);
         var valueRange = OperatorNode.create(ast.getLocation(), ExpressionOperator.CALL,
                                              List.of(RANGE),
                                              List.of(valueField, args.get(1), args.get(2)));
-        OperatorNode<ExpressionOperator> sameElement =
+        OperatorNode<ExpressionOperator> mapMatch =
                 OperatorNode.create(ast.getLocation(), ExpressionOperator.CALL,
-                                    List.of(SAME_ELEMENT),
-                                    List.of(makeMapComponentMatch("key", key), valueRange));
+                                    List.of(MAP_MATCH),
+                                    List.of(makeMapComponentMatch(KEY_FIELD_NAME, key), valueRange));
 
-        return OperatorNode.create(ast.getLocation(), ExpressionOperator.CONTAINS, field, sameElement);
+        return OperatorNode.create(ast.getLocation(), ExpressionOperator.CONTAINS, field, mapMatch);
     }
 
     /**
@@ -653,20 +660,27 @@ public class YqlParser implements Parser {
         return nonTaggableLeafStyleSettings(ast, item);
     }
 
-    private String derefVar(OperatorNode<ExpressionOperator> ast) {
-        Preconditions.checkState(ast.getOperator() == ExpressionOperator.VARREF, "derefVar() only accepts VARREF");
-        Preconditions.checkState(userQuery != null, "Query properties are not available");
-        String propName = ast.getArgument(0, String.class);
-        String prop = userQuery.properties().getString(propName);
-        Preconditions.checkState(prop != null, "Error, missing query property: " + propName);
-        return prop;
+    /** Returns the value of the query parameter referenced by the given VARREF node, which must be set. */
+    private String resolveParameter(OperatorNode<?> varref) {
+        String value = resolveOptionalParameter(varref);
+        if (value == null) {
+            throw new IllegalInputException("Input '" + varref.getArgument(0, String.class) + "' is not set");
+        }
+        return value;
+    }
+
+    /** Returns the value of the query parameter referenced by the given VARREF node, or null if it is not set. */
+    private String resolveOptionalParameter(OperatorNode<?> varref) {
+        assertHasOperator(varref, ExpressionOperator.VARREF);
+        Preconditions.checkState(parameters != null, "Query properties are not available");
+        return parameters.get(varref.getArgument(0, String.class));
     }
 
     private Object fetchLiteralOrRef(OperatorNode<ExpressionOperator> ast) {
         return switch (ast.getOperator()) {
             case LITERAL -> ast.getArgument(0);
             case READ_FIELD -> ast.getArgument(1); // TODO: Should probably remove this option
-            case VARREF -> derefVar(ast);
+            case VARREF -> resolveParameter(ast);
             default -> throw newUnexpectedArgumentException(ast.getOperator(),
                     ExpressionOperator.LITERAL, ExpressionOperator.READ_FIELD, ExpressionOperator.VARREF);
         };
@@ -876,11 +890,7 @@ public class YqlParser implements Parser {
                     String tokenValue = value.getArgument(0, String.class);
                     out.addToken(tokenValue);
                 }
-                case VARREF -> {
-                    Preconditions.checkState(userQuery != null, "Query properties are not available");
-                    String varRef = value.getArgument(0, String.class);
-                    ParameterListParser.addStringTokensFromString(userQuery.properties().getString(varRef), out);
-                }
+                case VARREF -> ParameterListParser.addStringTokensFromString(resolveParameter(value), out);
                 default -> throw newUnexpectedArgumentException(value.getOperator(),
                         ExpressionOperator.LITERAL, ExpressionOperator.VARREF);
             }
@@ -900,11 +910,7 @@ public class YqlParser implements Parser {
                     Long tokenValue = (numberTokenValue instanceof Integer) ? numberTokenValue.longValue() : Long.class.cast(numberTokenValue);
                     out.addToken(tokenValue);
                 }
-                case VARREF -> {
-                    Preconditions.checkState(userQuery != null, "Query properties are not available");
-                    String varRef = value.getArgument(0, String.class);
-                    ParameterListParser.addNumericTokensFromString(userQuery.properties().getString(varRef), out);
-                }
+                case VARREF -> ParameterListParser.addNumericTokensFromString(resolveParameter(value), out);
                 default -> throw newUnexpectedArgumentException(value.getOperator(),
                         ExpressionOperator.LITERAL, ExpressionOperator.VARREF);
             }
@@ -949,6 +955,36 @@ public class YqlParser implements Parser {
             swapIndexCreator(prev); // Also on a failed term, as this parser may be used again
         }
         return sameElement;
+    }
+
+    private Item instantiateMapMatch(String field, OperatorNode<ExpressionOperator> ast) {
+        assertHasFunctionName(ast, MAP_MATCH);
+        Item keyItem = null, valueItem = null;
+        // All terms below mapMatch are implicitly relative to its field.
+        IndexNameExpander prev = swapIndexCreator(new PrefixExpander(field));
+        try {
+            for (OperatorNode<ExpressionOperator> term : ast.<List<OperatorNode<ExpressionOperator>>> getArgument(1)) {
+                var item = convertExpression(term, field);
+                if (item instanceof HasIndexItem indexedItem) {
+                    if (indexedItem.getIndexName().equals(KEY_FIELD_NAME) && keyItem == null) {
+                        keyItem = item;
+                    } else if (indexedItem.getIndexName().equals(VALUE_FIELD_NAME) && valueItem == null) {
+                        valueItem = item;
+                    } else {
+                        throw new IllegalArgumentException("unknown or extra item inside " + MAP_MATCH + ": " + item);
+                    }
+                } else {
+                    throw new IllegalArgumentException("bad item type inside " + MAP_MATCH + ": " + item);
+                }
+            }
+        }
+        finally {
+            swapIndexCreator(prev); // Also on a failed term, as this parser may be used again
+        }
+        if (keyItem == null || valueItem == null) {
+            throw new IllegalArgumentException(MAP_MATCH + " requires both a " + KEY_FIELD_NAME + " and a " + VALUE_FIELD_NAME + " item");
+        }
+        return new MapMatchItem(field, keyItem, valueItem);
     }
 
     /** Extract custom annotations for same element */
@@ -1166,24 +1202,36 @@ public class YqlParser implements Parser {
     private Item buildTextInput(OperatorNode<ExpressionOperator> ast, String field,
                                 Query.Type defaultGrammar, boolean useModelType) {
         List<OperatorNode<ExpressionOperator>> args = ast.getArgument(1);
-        String wordData = getStringContents(args.get(0));
+        String text = getStringContents(args.get(0));
         Boolean allowEmpty = getAnnotation(ast, USER_INPUT_ALLOW_EMPTY, Boolean.class,
                                            Boolean.FALSE, "flag for allowing NullItem to be returned");
-        if (allowEmpty && (wordData == null || wordData.isEmpty())) return new NullItem();
+        if (allowEmpty && (text == null || text.isEmpty())) return new NullItem();
 
         boolean explicitLanguage = hasExplicitLanguageAnnotation(ast);
-        Language language = decideParsingLanguage(ast, wordData);
+        Language language = decideParsingLanguage(ast, text);
+        // userInput should determine the overall language if not set explicitly
+        if (userQuery != null && userQuery.getModel().getLanguage() == null)
+            userQuery.getModel().setLanguage(language);
+
         String grammar = getAnnotation(ast, USER_INPUT_GRAMMAR, String.class,
                                        defaultGrammar.toString(), "grammar for text processing");
         QueryType queryType = buildQueryType(ast, defaultGrammar, useModelType);
         if (USER_INPUT_GRAMMAR_RAW.equals(grammar)) {
-            return assignQueryType(instantiateWordItem(field, wordData, ast, null, SegmentWhen.NEVER, true, language),
+            return assignQueryType(instantiateWordItem(field, text, ast, null, SegmentWhen.NEVER, true, language),
                                    queryType);
         } else if (USER_INPUT_GRAMMAR_SEGMENT.equals(grammar)) {
-            return assignQueryType(instantiateWordItem(field, wordData, ast, null, SegmentWhen.ALWAYS, false, language),
+            return assignQueryType(instantiateWordItem(field, text, ast, null, SegmentWhen.ALWAYS, false, language),
                                    queryType);
         } else {
-            Item item = parseUserInput(queryType, field, wordData, language, explicitLanguage, allowEmpty);
+            Item item = Items.text(field, text, queryType, language, docTypes, Set.of(), environment);
+            if ( ! allowEmpty && (item == null || item instanceof NullItem))
+                throw new IllegalArgumentException("Parsing '" + text + "' only resulted in NullItem.");
+
+            // Mark the language used if it was explicitly set or is not the default
+            if (explicitLanguage || language != Language.ENGLISH)
+                // mark all the child items: it will be easier to figure out which item have which language
+                setLanguageRecursively(item, language);
+
             propagateUserInputAnnotationsRecursively(ast, item);
 
             // Set grammar-specific annotations
@@ -1270,15 +1318,7 @@ public class YqlParser implements Parser {
     private String getStringContents(OperatorNode<ExpressionOperator> operator) {
         return switch (operator.getOperator()) {
             case LITERAL -> operator.getArgument(0, String.class);
-            case VARREF -> {
-                Preconditions.checkState(userQuery != null,
-                        "properties must be available when trying to fetch user input");
-                String key = operator.getArgument(0, String.class);
-                String value = userQuery.properties().getString(key);
-                if (value == null)
-                    throw new IllegalInputException("Input '" + key + "' is not set");
-                yield value;
-            }
+            case VARREF -> resolveParameter(operator);
             default -> throw newUnexpectedArgumentException(operator.getOperator(),
                     ExpressionOperator.LITERAL, ExpressionOperator.VARREF);
         };
@@ -1286,29 +1326,6 @@ public class YqlParser implements Parser {
 
     private void propagateUserInputAnnotationsRecursively(OperatorNode<ExpressionOperator> ast, Item item) {
         ToolBox.visit(new AnnotationPropagator(ast), item);
-    }
-
-    private Item parseUserInput(QueryType queryType, String defaultIndex, String wordData,
-                                Language language, boolean explicitLanguage, boolean allowNullItem) {
-        Parser parser = ParserFactory.newInstance(queryType, environment);
-        // perhaps not use already resolved doctypes, but respect source and restrict
-        Item item = parser.parse(new Parsable().setQuery(wordData)
-                                               .addSources(docTypes)
-                                               .setLanguage(language)
-                                               .setDefaultIndexName(defaultIndex)).getRoot();
-
-        if ( ! allowNullItem && (item == null || item instanceof NullItem))
-            throw new IllegalArgumentException("Parsing '" + wordData + "' only resulted in NullItem.");
-
-        // Mark the language used if it was explicitly set or is not the default
-        if (explicitLanguage || language != Language.ENGLISH)
-            // mark all the child items: it will be easier to figure out which item have which language
-            setLanguageRecursively(item, language);
-
-        // userInput should determine the overall language if not set explicitly
-        if (userQuery != null && userQuery.getModel().getLanguage() == null)
-            userQuery.getModel().setLanguage(language);
-        return item;
     }
 
     private void setLanguageRecursively(Item item, Language language) {
@@ -1366,9 +1383,7 @@ public class YqlParser implements Parser {
 
     private String dereference(Object constantOrVarref) {
         if (constantOrVarref instanceof OperatorNode<?> varref) {
-            Preconditions.checkState(userQuery != null,
-                                     "properties must be available when trying to fetch user input");
-            return userQuery.properties().getString(varref.getArgument(0, String.class));
+            return resolveParameter(varref);
         }
         else {
             return constantOrVarref.toString();
@@ -1580,11 +1595,7 @@ public class YqlParser implements Parser {
             ast = ast.getArgument(0);
         }
         return switch (ast.getOperator()) {
-            case VARREF -> {
-                Preconditions.checkState(userQuery != null,
-                        "properties must be available when trying to fetch user input");
-                yield negative + userQuery.properties().getString(ast.getArgument(0, String.class));
-            }
+            case VARREF -> negative + resolveParameter(ast);
             case LITERAL -> negative + ast.getArgument(0).toString();
             default -> throw new IllegalArgumentException("Expected VARREF or LITERAL, got " + ast.getOperator());
         };
@@ -1879,6 +1890,7 @@ public class YqlParser implements Parser {
         Preconditions.checkArgument(names.size() == 1, "Expected 1 name, got %s.", names.size());
         return switch (names.get(0)) {
             case SAME_ELEMENT -> instantiateSameElementItem(field, ast);
+            case MAP_MATCH -> instantiateMapMatch(field, ast);
             case PHRASE -> instantiatePhraseItem(field, ast);
             case NEAR -> instantiateNearItem(field, ast);
             case ONEAR -> instantiateONearItem(field, ast);
@@ -1888,7 +1900,7 @@ public class YqlParser implements Parser {
             case FUZZY -> instantiateFuzzyItem(field, ast);
             case TEXT -> buildText(field, ast);
             default ->
-                    throw newUnexpectedArgumentException(names.get(0), EQUIV, NEAR, ONEAR, PHRASE, SAME_ELEMENT, TEXT, URI, FUZZY);
+                    throw newUnexpectedArgumentException(names.get(0), EQUIV, NEAR, ONEAR, PHRASE, MAP_MATCH, SAME_ELEMENT, TEXT, URI, FUZZY);
         };
     }
 
@@ -2339,7 +2351,10 @@ public class YqlParser implements Parser {
     public void setQueryParser(boolean queryParser) { this.queryParser = queryParser; }
 
     @Beta
-    public void setUserQuery(Query userQuery) { this.userQuery = userQuery; }
+    public void setUserQuery(Query userQuery) {
+        this.userQuery = userQuery;
+        this.parameters = userQuery == null ? null : ParameterResolver.of(userQuery.properties());
+    }
 
     @Beta
     public Set<String> getYqlSummaryFields() { return yqlSummaryFields; }
@@ -2421,13 +2436,12 @@ public class YqlParser implements Parser {
             case MAP -> addStringItems(ast, out);
             case ARRAY -> addLongItems(ast, out);
             case VARREF -> {
-                Preconditions.checkState(userQuery != null, "Query properties are not available");
-                String name = ast.getArgument(0, String.class);
-                String value = userQuery.properties().getString(name);
-                if (value != null)
+                String value = resolveOptionalParameter(ast);
+                if (value != null) {
                     ParameterListParser.addItemsFromString(value, out);
-                else
-                    addItemsFromSubProperties(name, out);
+                } else {
+                    addItemsFromSubProperties(ast.getArgument(0, String.class), out);
+                }
             }
             default -> throw newUnexpectedArgumentException(ast.getOperator(),
                                                             ExpressionOperator.ARRAY, ExpressionOperator.MAP);
@@ -2623,9 +2637,7 @@ public class YqlParser implements Parser {
                                                                        && considerParents && i.hasNext();) {
             OperatorNode<?> node = i.next();
             if (node.getOperator() == ExpressionOperator.VARREF) {
-                Preconditions.checkState(userQuery != null,
-                                         "properties must be available when trying to fetch user input");
-                value = userQuery.properties().getString(ast.getArgument(0, String.class));
+                value = resolveOptionalParameter(node);
             }
             else {
                 value = node.getAnnotation(key);

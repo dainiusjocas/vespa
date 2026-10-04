@@ -36,6 +36,7 @@ INJECT SchemaParser:
     import com.yahoo.schema.parser.DictionaryOption;
     import com.yahoo.schema.parser.ParsedAnnotation;
     import com.yahoo.schema.parser.ParsedAttribute;
+    import com.yahoo.schema.parser.ParsedQuantization;
     import com.yahoo.schema.parser.ParsedDocument;
     import com.yahoo.schema.parser.ParsedDocumentSummary;
     import com.yahoo.schema.parser.ParsedField;
@@ -532,6 +533,7 @@ TOKEN :
 | < PAGED: "paged" >
 | < FAST_RANK: "fast-rank" >
 | < FAST_SEARCH: "fast-search" >
+| < FAST_SEARCH_MAP_FIELD: "fast-search-map-field" >
 | < TENSOR_TYPE: "tensor" ("<" (~["<",">"])+ ">")? "(" (~["(",")"])* ")" >
 | < TENSOR_VALUE_SL: "value" (" ")* ":" (" ")* ("{"<BRACE_SL_LEVEL_1>) ("\n")? >
 | < TENSOR_VALUE_ML: "value" (<SEARCHLIB_SKIP>)? "{" (["\n"," "])* ("{"<BRACE_ML_LEVEL_1>) (["\n"," "])* "}" ("\n")? >
@@ -582,6 +584,8 @@ TOKEN :
 | < DISTANCE_METRIC: "distance-metric" >
 | < NEIGHBORS_TO_EXPLORE_AT_INSERT: "neighbors-to-explore-at-insert" >
 | < MULTI_THREADED_INDEXING: "multi-threaded-indexing" >
+| < QUANTIZATION: "quantization" >
+| < BITS: "bits" >
 | < MATCH_FEATURES: "match-features" >
 | < SELECT_ELEMENTS_BY: "select-elements-by" >
 | < SUMMARY_FEATURES: "summary-features" >
@@ -1222,7 +1226,7 @@ void fieldBodyElm(ParsedField field) : { }
        summaryToElm(field) |
        weightElm(field) |
        weightedsetElm(field.getType()) |
-       mapElm(field)
+       fastSearchMapElm(field)
     )
 ;
 
@@ -1405,22 +1409,54 @@ void weightedsetBody(ParsedType type) : { }
 ;
 
 /**
- * This rule consumes a map statement of a field element.
+ * This rule consumes a fast-search-map-field statement of a field element, which names the lookup
+ * field of a map, or of an array of struct used as a map, with the key and value fields given in a block.
  *
  * @param field The field to modify.
  */
-void mapElm(ParsedField field) : { }
-    <MAP> ( (<COLON> mapBody(field))
-                | (openLbrace() (mapBody(field) | <NL>)* <RBRACE>) )
+void fastSearchMapElm(ParsedField field) :
+{
+    String name;
+    Token nameToken;
+    ParsedField.ParsedFastMapSearch fastMapSearch = null;
+}
+    <FAST_SEARCH_MAP_FIELD> name = identifierStr()
+    {
+        nameToken = lastConsumedToken;
+        try {
+            fastMapSearch = field.addFastMapSearch(name);
+        } catch (IllegalArgumentException e) {
+            nameToken.addIllegalArgumentException(e);
+        }
+    }
+    [ SCAN((<NL>)* <LBRACE>) => openLbrace() (fastSearchMapBody(fastMapSearch) | <NL>)* <RBRACE> ]
 ;
 
 /**
- * This rule consumes one body item of a map block.
+ * This rule consumes one body item of a fast-search-map-field block.
  *
- * @param field The field to modify.
+ * @param fastMapSearch The fast-search-map-field to modify, or null if it was rejected.
  */
-void mapBody(ParsedField field) : { }
-    ( <FAST_SEARCH> { field.setFastMapSearch(true); } )
+void fastSearchMapBody(ParsedField.ParsedFastMapSearch fastMapSearch) :
+{
+    String name;
+    Token nameToken;
+    String structFieldName;
+}
+    name = identifierStr() { nameToken = lastConsumedToken; } <COLON> structFieldName = identifierStr()
+    {
+        try {
+            if ( ! name.equals("key") && ! name.equals("value")) {
+                nameToken.addIllegalArgumentException(new IllegalArgumentException(
+                        "Expected 'key' or 'value' in 'fast-search-map-field', but got '" + name + "'."));
+            } else if (fastMapSearch != null) {
+                if (name.equals("key")) fastMapSearch.setKeyField(structFieldName);
+                else fastMapSearch.setValueField(structFieldName);
+            }
+        } catch (IllegalArgumentException e) {
+            nameToken.addIllegalArgumentException(e);
+        }
+    }
 ;
 
 /**
@@ -1509,6 +1545,26 @@ void sortingSetting(ParsedSorting sorting) :
     )
 ;
 
+void attributeQuantization(ParsedAttribute attr) :
+{
+    int bits;
+    Token bitsToken;
+}
+
+    <QUANTIZATION> ( openLbrace()
+                     <BITS> <COLON> bits = integerElm() { bitsToken = lastConsumedToken; }
+                     {
+                         try {
+                             attr.setQuantization(ParsedQuantization.ofBits(bits));
+                         } catch (IllegalArgumentException e) {
+                             bitsToken.addIllegalArgumentException(e);
+                         }
+                     }
+                     (<NL>)*
+                     <RBRACE>
+                   )
+;
+
 /**
  * This rule consumes a single attribute setting statement of an attribute element.
  *
@@ -1535,6 +1591,7 @@ void attributeSetting(ParsedAttribute attribute) :
           attribute.addAlias(aliasedName, alias);
       }
       | <DISTANCE_METRIC> <COLON> str = identifierWithDashStr { attribute.setDistanceMetric(str); }
+      | attributeQuantization(attribute)
     )
 ;
 
@@ -3609,6 +3666,7 @@ String identifierWithDashStr :
     | <FAST_ACCESS>
     | <FAST_RANK>
     | <FAST_SEARCH>
+    | <FAST_SEARCH_MAP_FIELD>
     | <FILTER_FIRST_EXPLORATION>
     | <FILTER_FIRST_THRESHOLD>
     | <FILTER_THRESHOLD>
@@ -3685,6 +3743,7 @@ String identifierStr :
       | <AS>
       | <ASCENDING>
       | <ATTRIBUTE>
+      | <BITS>
       | <BOLDING>
       | <BTREE>
       | <CASED>
@@ -3754,6 +3813,7 @@ String identifierStr :
       | <PRIMARY>
       | <PROFILE>
       | <PROPERTIES>
+      | <QUANTIZATION>
       | <QUATERNARY>
       | <QUERY>
       | <RANK>

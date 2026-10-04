@@ -24,6 +24,7 @@ Landlock::AccessRules::~AccessRules() = default;
 #if VESPA_HAS_LANDLOCK
 
 #include <vespa/vespalib/util/error.h>
+#include <vespa/vespalib/util/string_escape.h>
 
 #include <fcntl.h>
 #include <linux/landlock.h>
@@ -76,14 +77,14 @@ void add_path_ruleset(const int ruleset_fd, const uint64_t supported_flags, cons
                       const int wanted_access) {
     const FdWrapper parent(open(path.c_str(), O_PATH | O_CLOEXEC));
     if (parent.fd == -1) {
-        std::println(std::cerr, "landlock: failed to open '{:?}': {}", path.c_str(), getLastErrorString());
+        std::println(std::cerr, "landlock: failed to open \"{}\": {}", escape(path.c_str()), getLastErrorString());
         return;
     }
     landlock_path_beneath_attr path_beneath{};
     path_beneath.parent_fd = parent.fd;
     struct ::stat statbuf{};
     if (fstat(path_beneath.parent_fd, &statbuf) == -1) {
-        std::println(std::cerr, "landlock: failed to stat '{:?}': {}", path.c_str(), getLastErrorString());
+        std::println(std::cerr, "landlock: failed to stat \"{}\": {}", escape(path.c_str()), getLastErrorString());
         return;
     }
     uint64_t access_flags = 0;
@@ -100,7 +101,8 @@ void add_path_ruleset(const int ruleset_fd, const uint64_t supported_flags, cons
     path_beneath.allowed_access = access_flags & supported_flags;
     int err = my_landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &path_beneath, 0);
     if (err) {
-        std::println(std::cerr, "landlock: failed to add rule for '{:?}': {}", path.c_str(), getLastErrorString());
+        std::println(std::cerr, "landlock: failed to add rule for \"{}\": {}", escape(path.c_str()),
+                     getLastErrorString());
     }
 }
 
@@ -162,11 +164,10 @@ std::optional<bool> Landlock::landlock_self(const AccessRules& access) {
     default:;
     }
 
-    landlock_ruleset_attr ruleset_attr = {
-        .handled_access_fs = fs_flags,
-        .handled_access_net = net_flags,
-        .scoped = scoped_flags,
-    };
+    landlock_ruleset_attr ruleset_attr{};
+    ruleset_attr.handled_access_fs = fs_flags;
+    ruleset_attr.handled_access_net = net_flags;
+    ruleset_attr.scoped = scoped_flags;
     const FdWrapper ruleset(my_landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0));
     if (ruleset.fd < 0) {
         perror("landlock_create_ruleset");
@@ -223,13 +224,13 @@ std::optional<Landlock::AccessRules> Landlock::from_env() {
             } else if (access_sv == "rwx") {
                 flags = READ | WRITE | EXEC;
             } else {
-                std::println(std::cerr, "Unknown access specifier: '{:?}'. Supported are: ro, rw, rx, rwx",
-                             access_sv);
+                std::println(std::cerr, "Unknown access specifier: \"{}\". Supported are: ro, rw, rx, rwx",
+                             escape(access_sv));
             }
             // The presence of multiple commas indicates a misconfiguration or perhaps
             // even some sneaky stuff going on.
             if (access_sv.contains(',')) {
-                std::println(std::cerr, "landlock: illegal duplicate comma in path entry '{:?}'", entry_sv);
+                std::println(std::cerr, "landlock: illegal duplicate comma in path entry \"{}\"", escape(entry_sv));
                 flags = 0;
             }
         } else {
@@ -240,6 +241,17 @@ std::optional<Landlock::AccessRules> Landlock::from_env() {
         } // else: no rule entry means no access by default
     }
     return access;
+}
+
+bool Landlock::maybe_setup_from_env() {
+    auto rules = from_env();
+    if (rules) {
+        auto status = landlock_self(*rules);
+        if (status && *status == false) {
+            return false;
+        } // else: either landlocked OK or not supported at all by platform
+    } // else: no landlock enforcement configured
+    return true;
 }
 
 } // namespace vespalib
@@ -256,6 +268,10 @@ std::optional<bool> Landlock::landlock_self(const AccessRules&) {
 
 std::optional<Landlock::AccessRules> Landlock::from_env() {
     return std::nullopt;
+}
+
+bool Landlock::maybe_setup_from_env() {
+    return true;
 }
 
 } // namespace vespalib

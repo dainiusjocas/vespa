@@ -19,7 +19,6 @@
 #include <vespa/vespalib/data/slime/cursor.h>
 #include <vespa/vespalib/data/slime/inserter.h>
 
-#include <limits>
 #include <optional>
 
 #include <vespa/log/log.h>
@@ -27,16 +26,13 @@ LOG_SETUP(".proton.matching.match_thread");
 
 namespace proton::matching {
 
-using search::attribute::AttributeOperation;
 using search::fef::BlueprintResolver;
 using search::fef::FeatureResolver;
 using search::fef::LazyValue;
-using search::fef::MatchData;
 using search::fef::RankProgram;
 using search::queryeval::HitCollector;
 using search::queryeval::ProfiledIterator;
 using search::queryeval::SearchIterator;
-using search::queryeval::SortedHitSequence;
 
 namespace {
 
@@ -58,14 +54,14 @@ LazyValue get_score_feature(const RankProgram& rankProgram) {
     return resolver.resolve(0);
 }
 
-void fillPartialResult(ResultProcessor::Context& context, size_t totalHits, size_t numHits,
-                       const search::RankedHit* hits, const search::BitVector* bits) __attribute__((noinline));
+void fillPartialResult(ResultProcessor::Context& context, size_t totalHits, std::span<const search::RankedHit> hits,
+                       const search::BitVector* bits) __attribute__((noinline));
 
-void fillPartialResult(ResultProcessor::Context& context, size_t totalHits, size_t numHits,
-                       const search::RankedHit* hits, const search::BitVector* bits) {
+void fillPartialResult(ResultProcessor::Context& context, size_t totalHits, std::span<const search::RankedHit> hits,
+                       const search::BitVector* bits) {
     PartialResult& pr = *context.result;
     pr.totalHits(totalHits);
-    size_t                   maxHits = std::min(numHits, pr.maxSize());
+    size_t                   maxHits = std::min(hits.size(), pr.maxSize());
     const search::BitVector& validLids = context._validLids;
     if (pr.hasSortData()) {
         FastS_SortSpec& spec = context.sort->sortSpec;
@@ -363,7 +359,14 @@ void MatchThread::secondPhase(MatchTools& tools, HitCollector& hits) {
 
 search::ResultSet::UP MatchThread::findMatches(MatchTools& tools) {
     if (tools.has_sort_selection()) {
-        tools.setup_first_phase_and_sort(first_phase_profiler.get(), match_with_ranking);
+        // Created here, not in the constructor, so that only queries with an installed feature sort report it.
+        if (trace->getLevel() > 0) {
+            if (int32_t depth = trace->sort_features_profile_depth(); depth != 0) {
+                sort_features_profiler = std::make_unique<vespalib::ExecutionProfiler>(depth);
+            }
+        }
+        tools.setup_first_phase_and_sort(first_phase_profiler.get(), sort_features_profiler.get(),
+                                         match_with_ranking);
     } else {
         tools.setup_first_phase(first_phase_profiler.get());
     }
@@ -425,45 +428,50 @@ std::unique_ptr<search::ResultSet> MatchThread::get_matches_after_second_phase_r
 }
 
 void MatchThread::processResult(const Doom& doom, search::ResultSet::UP result, ResultProcessor::Context& context) {
-    if (doom.hard_doom())
+    if (doom.hard_doom()) {
         return;
+    }
     bool hasGrouping = bool(context.grouping);
     if (context.sort->hasSortData() || hasGrouping) {
         result->mergeWithBitOverflow(fallback_rank_value());
     }
-    if (doom.hard_doom())
+    if (doom.hard_doom()) {
         return;
-    size_t                   totalHits = result->getNumHits(); // Must be done before modifying overflow
-    const search::RankedHit* hits = result->getArray();
-    size_t                   numHits = result->getArrayUsed();
-    search::BitVector*       bits = result->getBitOverflow();
-    if (bits != nullptr && hits != nullptr) {
-        bits->andNotWithT(search::RankedHitIterator(hits, numHits));
     }
-    if (doom.hard_doom())
+    size_t             totalHits = result->getNumHits(); // Must be done before modifying overflow
+    const auto&        hits = result->array_view();
+    search::BitVector* bits = result->getBitOverflow();
+    if (bits != nullptr && hits.size() > 0) {
+        bits->andNotWithT(search::RankedHitIterator(hits.data(), hits.size()));
+    }
+    if (doom.hard_doom()) {
         return;
+    }
     if (hasGrouping) {
         search::grouping::GroupingManager man(*context.grouping);
-        man.groupUnordered(_distributionKey, hits, numHits, bits);
+        man.groupUnordered(_distributionKey, hits, bits);
     }
-    if (doom.hard_doom())
+    if (doom.hard_doom()) {
         return;
-    size_t sortLimit = hasGrouping ? numHits : context.result->maxSize();
+    }
+    size_t sortLimit = hasGrouping ? hits.size() : context.result->maxSize();
     result->sort(*context.sort->sorter, sortLimit);
     if (context.sort->sortSpec.feature_values_failed()) {
         // The hits are not in the requested order; the matcher fails the query.
         resultProcessor.note_sort_feature_failure();
     }
-    if (doom.hard_doom())
+    if (doom.hard_doom()) {
         return;
+    }
     if (hasGrouping) {
         search::grouping::GroupingManager man(*context.grouping);
-        man.groupInRelevanceOrder(_distributionKey, hits, numHits);
+        man.groupInRelevanceOrder(_distributionKey, hits);
         man.convertToGlobalId(matchToolsFactory.metaStore());
     }
-    if (doom.hard_doom())
+    if (doom.hard_doom()) {
         return;
-    fillPartialResult(context, totalHits, numHits, hits, bits);
+    }
+    fillPartialResult(context, totalHits, hits, bits);
 
     if (auto task = matchToolsFactory.createOnMatchTask()) {
         task->run(result->copyResult());
@@ -499,6 +507,7 @@ MatchThread::MatchThread(size_t thread_id_in, size_t num_threads_in, const Match
       match_profiler(),
       first_phase_profiler(),
       second_phase_profiler(),
+      sort_features_profiler(),
       my_issues() {
     if (trace->getLevel() > 0) {
         if (int32_t depth = trace->match_profile_depth(); depth != 0) {
@@ -568,6 +577,11 @@ void MatchThread::run() {
     }
     if (second_phase_profiler) {
         second_phase_profiler->report(trace->createCursor("second_phase_profiling"), [](const std::string& name) {
+            return BlueprintResolver::describe_feature(name);
+        });
+    }
+    if (sort_features_profiler) {
+        sort_features_profiler->report(trace->createCursor("sort_features_profiling"), [](const std::string& name) {
             return BlueprintResolver::describe_feature(name);
         });
     }

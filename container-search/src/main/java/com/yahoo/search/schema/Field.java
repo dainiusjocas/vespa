@@ -3,9 +3,12 @@ package com.yahoo.search.schema;
 
 import com.yahoo.tensor.TensorType;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -20,7 +23,7 @@ public class Field implements FieldInfo {
     private final boolean isAttribute;
     private final boolean isIndex;
     private final boolean bitPacked;
-    private final boolean fastMapSearch;
+    private final List<FastMapSearchFields> fastMapSearches;
     private final Set<String> aliases;
 
     public Field(Builder builder) {
@@ -29,7 +32,7 @@ public class Field implements FieldInfo {
         this.isAttribute = builder.isAttribute;
         this.isIndex = builder.isIndex;
         this.bitPacked = builder.isBitPacked;
-        this.fastMapSearch = builder.fastMapSearch;
+        this.fastMapSearches = List.copyOf(builder.fastMapSearches);
         this.aliases = Set.copyOf(builder.aliases);
     }
 
@@ -51,22 +54,34 @@ public class Field implements FieldInfo {
 
     @Override
     public boolean hasFastMapSearch() {
-        return fastMapSearch;
+        return ! fastMapSearches.isEmpty();
+    }
+
+    /** Returns the key and value fields of each fast map search of this field, or an empty list if it has none. */
+    public List<FastMapSearchFields> fastMapSearches() {
+        return fastMapSearches;
+    }
+
+    /** Returns the key and value fields of the fast map search with the given lookup name, if this field has it. */
+    public Optional<FastMapSearchFields> fastMapSearch(String lookupName) {
+        return fastMapSearches.stream().filter(fastMap -> fastMap.lookupName().equals(lookupName)).findFirst();
     }
 
     @Override
     public boolean equals(Object o) {
         if ( ! (o instanceof Field other)) return false;
         if ( ! this.name.equals(other.name)) return false;
+        if ( ! this.type.equals(other.type)) return false;
         if ( this.isAttribute != other.isAttribute) return false;
         if ( this.isIndex != other.isIndex) return false;
+        if ( ! this.fastMapSearches.equals(other.fastMapSearches)) return false;
         if ( ! this.aliases.equals(other.aliases)) return false;
         return true;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, type, isAttribute, isIndex, aliases);
+        return Objects.hash(name, type, isAttribute, isIndex, fastMapSearches, aliases);
     }
 
     @Override
@@ -90,6 +105,18 @@ public class Field implements FieldInfo {
          * Structured types have additional information in the subclass specific to that kind of type.
          */
         public Kind kind() { return kind; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (o == this) return true;
+            if (o == null || o.getClass() != this.getClass()) return false;
+            return this.kind == ((Type)o).kind;
+        }
+
+        @Override
+        public int hashCode() {
+            return kind.hashCode();
+        }
 
         @Override
         public String toString() {
@@ -150,6 +177,17 @@ public class Field implements FieldInfo {
         public TensorType tensorType() { return tensorType; }
 
         @Override
+        public boolean equals(Object o) {
+            if ( ! super.equals(o)) return false;
+            return this.tensorType.equals(((TensorFieldType)o).tensorType);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(super.hashCode(), tensorType);
+        }
+
+        @Override
         public String toString() {
             return tensorType.toString();
         }
@@ -175,6 +213,18 @@ public class Field implements FieldInfo {
             return valueType;
         }
 
+        @Override
+        public boolean equals(Object o) {
+            if ( ! super.equals(o)) return false;
+            var other = (MapFieldType)o;
+            return this.keyType.equals(other.keyType) && this.valueType.equals(other.valueType);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(super.hashCode(), keyType, valueType);
+        }
+
         public static Type from(String typeString) {
             typeString = typeString.substring("map<".length());
             typeString = typeString.substring(0, typeString.lastIndexOf(">"));
@@ -182,6 +232,27 @@ public class Field implements FieldInfo {
             String[] parts = Arrays.stream(typeString.split(",", 2)).map(String::trim).toArray(String[]::new);
             return new MapFieldType(Type.from(parts[0]), Type.from(parts[1]));
         }
+    }
+
+    /**
+     * The name of the lookup field, and the struct fields holding the key and the value, of a field with
+     * fast map search, which is either a map, or an array of a struct acting as a map entry.
+     */
+    public record FastMapSearchFields(String lookupName, String keyField, Type keyType, String valueField, Type valueType) {
+
+        public FastMapSearchFields {
+            Objects.requireNonNull(lookupName);
+            Objects.requireNonNull(keyField);
+            Objects.requireNonNull(keyType);
+            Objects.requireNonNull(valueField);
+            Objects.requireNonNull(valueType);
+        }
+
+        /** Returns the fast map search fields of a map, whose key and value are always named key and value. */
+        public static FastMapSearchFields of(String lookupName, MapFieldType mapType) {
+            return new FastMapSearchFields(lookupName, "key", mapType.keyType(), "value", mapType.valueType());
+        }
+
     }
 
     public static class Builder {
@@ -192,7 +263,7 @@ public class Field implements FieldInfo {
         private boolean isAttribute;
         private boolean isIndex;
         private boolean isBitPacked;
-        private boolean fastMapSearch;
+        private final List<FastMapSearchFields> fastMapSearches = new ArrayList<>();
 
         public Builder(String name, String typeString) {
             this.name = name;
@@ -219,8 +290,23 @@ public class Field implements FieldInfo {
             return this;
         }
 
-        public Builder setFastMapSearch(boolean fastMapSearch) {
-            this.fastMapSearch = fastMapSearch;
+        /** Adds a fast map search with the given lookup field name to this field, which must be a map. */
+        public Builder addFastMapSearch(String lookupName) {
+            if (type instanceof MapFieldType mapType) {
+                return addFastMapSearch(FastMapSearchFields.of(lookupName, mapType));
+            }
+            throw new IllegalArgumentException("Fast map search on " + name + " requires the key and value " +
+                                               "fields, since it is not a map but " + type);
+        }
+
+        /** Adds a fast map search to this field. A field may have several, with different lookup names. */
+        public Builder addFastMapSearch(FastMapSearchFields fastMapSearch) {
+            Objects.requireNonNull(fastMapSearch);
+            if (fastMapSearches.stream().anyMatch(other -> other.lookupName().equals(fastMapSearch.lookupName()))) {
+                throw new IllegalArgumentException("Field " + name + " already has a fast map search named '" +
+                                                   fastMapSearch.lookupName() + "'");
+            }
+            this.fastMapSearches.add(fastMapSearch);
             return this;
         }
 

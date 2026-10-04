@@ -43,12 +43,12 @@ const uint32_t x_aspect = 0;
 const Location location(position, max_distance, x_aspect);
 
 std::vector<StringRange> string_ranges() {
-    return {StringRange(std::make_unique<search::StringRangeSpec>("aaa", true, false, "zzz", false, false)),
-            StringRange(std::make_unique<search::StringRangeSpec>("", true, true, "zzz", true, false)),
-            StringRange(std::make_unique<search::StringRangeSpec>("aaa", false, false, "", false, true)),
-            StringRange(std::make_unique<search::StringRangeSpec>("", false, true, "", false, true)),
-            StringRange(std::make_unique<search::StringRangeSpec>("aaa", true, false, "zzz", false, false, 42)),
-            StringRange(std::make_unique<search::StringRangeSpec>("aaa", true, false, "zzz", false, false, -42))};
+    return {StringRange(std::in_place, "aaa", true, "zzz", false),
+            StringRange(std::in_place, std::nullopt, true, "zzz", true),
+            StringRange(std::in_place, "aaa", false, std::nullopt, false),
+            StringRange(std::in_place, std::nullopt, false, std::nullopt, false),
+            StringRange(std::in_place, "aaa", true, "zzz", false, 42),
+            StringRange(std::in_place, "aaa", true, "zzz", false, -42)};
 }
 
 PredicateQueryTerm::UP getPredicateQueryTerm() {

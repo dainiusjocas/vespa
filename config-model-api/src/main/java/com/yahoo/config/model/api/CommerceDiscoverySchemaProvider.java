@@ -15,6 +15,10 @@ import java.util.List;
  *
  * @author sebasabe
  */
+// TODO: Remove when no config model version older than the one introducing CommerceDiscoveryProvider is in use
+//       in any zone. Kept so that older config models, whose VespaModelFactory injects
+//       ComponentRegistry<CommerceDiscoverySchemaProvider>, can still be resolved on newer config servers.
+@Deprecated
 public interface CommerceDiscoverySchemaProvider {
 
     /**
