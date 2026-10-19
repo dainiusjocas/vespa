@@ -21,6 +21,7 @@ public class RpcInvokerFactory extends InvokerFactory {
     private final RpcConnectionPool rpcResourcePool;
     private final CompressPayload compressor;
     private final RpcProtobufFillInvoker.DecodePolicy decodeType;
+    private final SearchGroups groups;
 
     private static RpcProtobufFillInvoker.DecodePolicy convert(DispatchConfig.SummaryDecodePolicy.Enum decoding) {
         return switch (decoding) {
@@ -34,6 +35,7 @@ public class RpcInvokerFactory extends InvokerFactory {
         this.rpcResourcePool = rpcResourcePool;
         this.compressor = new CompressService();
         this.decodeType = convert(dispatchConfig.summaryDecodePolicy());
+        this.groups = cluster;
     }
 
     @Override
@@ -45,7 +47,7 @@ public class RpcInvokerFactory extends InvokerFactory {
     public FillInvoker createFillInvoker(VespaBackend searcher, Result result) {
         Query query = result.getQuery();
         boolean summaryNeedsQuery = searcher.summaryNeedsQuery(query);
-        return new RpcProtobufFillInvoker(rpcResourcePool, compressor, searcher.getDocumentDatabase(query),
+        return new RpcProtobufFillInvoker(rpcResourcePool, groups, compressor, searcher.getDocumentDatabase(query),
                                           searcher.getServerId(), decodeType, summaryNeedsQuery);
     }
 

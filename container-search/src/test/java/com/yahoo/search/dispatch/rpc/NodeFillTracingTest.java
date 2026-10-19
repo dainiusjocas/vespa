@@ -252,6 +252,7 @@ class NodeFillTracingTest {
 
     private RpcProtobufFillInvoker invokerOver(Map<Integer, Client.NodeConnection> connections) {
         return new RpcProtobufFillInvoker(new RpcResourcePool(new HashMap<>(connections)),
+                                          null,
                                           COMPRESSOR,
                                           new DocumentDatabase(schemaWithDefaultSummary()),
                                           "container.0",

@@ -19,6 +19,9 @@ import com.yahoo.search.Result;
 import com.yahoo.search.dispatch.Dispatcher;
 import com.yahoo.search.dispatch.FillInvoker;
 import com.yahoo.search.dispatch.rpc.Client.ProtobufResponse;
+import com.yahoo.search.dispatch.searchcluster.Group;
+import com.yahoo.search.dispatch.searchcluster.Node;
+import com.yahoo.search.dispatch.searchcluster.SearchGroups;
 import com.yahoo.search.result.ErrorMessage;
 import com.yahoo.search.result.Hit;
 import com.yahoo.slime.ArrayTraverser;
@@ -30,10 +33,13 @@ import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.context.Context;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -56,6 +62,7 @@ public class RpcProtobufFillInvoker extends FillInvoker {
 
     private final DocumentDatabase documentDb;
     private final RpcConnectionPool resourcePool;
+    private final SearchGroups groups;
     private boolean summaryNeedsQuery;
     private final PartialSummaryHandler partialSummaryHandler;
 
@@ -70,6 +77,9 @@ public class RpcProtobufFillInvoker extends FillInvoker {
     /** Whether we have already logged/notified about an error - to avoid spamming */
     private boolean hasReportedError = false;
 
+    /** Whether a content node reported running out of time while producing docsums */
+    private boolean contentNodeTimedOut = false;
+
     /** The number of responses we should receive (and process) before this is complete */
     private int outstandingResponses;
     private int numOkFilledHits = 0;
@@ -79,10 +89,12 @@ public class RpcProtobufFillInvoker extends FillInvoker {
     private static final AtomicInteger noRetryCounter = new AtomicInteger();
     private static final AtomicInteger retryTimeoutCounter = new AtomicInteger();
 
-    RpcProtobufFillInvoker(RpcConnectionPool resourcePool, CompressPayload compressor, DocumentDatabase documentDb,
-                           String serverId, DecodePolicy decodePolicy, boolean summaryNeedsQuery) {
+    RpcProtobufFillInvoker(RpcConnectionPool resourcePool, SearchGroups groups, CompressPayload compressor,
+                           DocumentDatabase documentDb, String serverId, DecodePolicy decodePolicy,
+                           boolean summaryNeedsQuery) {
         this.documentDb = documentDb;
         this.resourcePool = resourcePool;
+        this.groups = groups;
         this.serverId = serverId;
         this.summaryNeedsQuery = summaryNeedsQuery;
         this.compressor = compressor;
@@ -286,7 +298,9 @@ public class RpcProtobufFillInvoker extends FillInvoker {
 
     private void addErrors(Result result, com.yahoo.slime.Inspector errors) {
         errors.traverse((ArrayTraverser) (index, value) -> {
-            int errorCode = ("timeout".equalsIgnoreCase(value.field("type").asString())) ? Error.TIMEOUT.code : Error.UNSPECIFIED.code;
+            boolean isTimeout = "timeout".equalsIgnoreCase(value.field("type").asString());
+            if (isTimeout) contentNodeTimedOut = true;
+            int errorCode = isTimeout ? Error.TIMEOUT.code : Error.UNSPECIFIED.code;
             result.hits().addError(new ErrorMessage(errorCode, value.field("message").asString(), value.field("details").asString()));
         });
     }
@@ -363,6 +377,8 @@ public class RpcProtobufFillInvoker extends FillInvoker {
      * To avoid overloading the content layer, we only retry if the number of skipped hits
      * is below a tunable limit, and if the ratio of failed to ok hits is below another
      * tunable limit (if too much failed on first try, it's likely not helpful to retry).
+     * Above those limits we instead retry once on the nodes of a single other group, as
+     * that group holds a full copy of the corpus and the cost is bounded by its size.
      */
     private void maybeRetry(List<FastHit> skippedHits, Result result, String summaryClass) throws InterruptedException {
         int numSkipped = skippedHits.size();
@@ -385,38 +401,88 @@ public class RpcProtobufFillInvoker extends FillInvoker {
                 if (shouldLogRetry()) {
                     log.log(Level.INFO, "Retry docsum fetch for " + numSkipped + " hits (" + numOkFilledHits + " ok hits)");
                 }
-                summaryNeedsQuery = true;
-                sendFillRequestByNode(result, summaryClass, retryMap);
-                while (outstandingResponses > 0 && numOkFilledHits < numHitsToFill) {
-                    var responseAndHits = getNextResponse(query.getTimeLeft());
-                    if (responseAndHits == null) {
-                        if (shouldLogRetryTimeout()) {
-                            log.log(Level.WARNING, "Timed out waiting for summary data. " + outstandingResponses + " responses outstanding.");
-                        }
-                        break;
-                    }
-                    processOneResponse(result, responseAndHits, true);
-                    outstandingResponses--;
-                }
-                skippedHits.removeIf(hit -> !partialSummaryHandler.needFill(hit));
-
-                // Span.current() here IS dispatch.fill: FillInvoker.fill -> getFillResults -> processResponses
-                // -> maybeRetry is synchronous on one thread, so the span needs no plumbing to reach.
-                Span.current().setAttribute(TraceAttributes.FILL_SKIPPED,     numSkipped)
-                              .setAttribute(TraceAttributes.FILL_RETRIED,     true)
-                              .setAttribute(TraceAttributes.FILL_RETRY_NODES, retryMap.size())
-                              .setAttribute(TraceAttributes.FILL_UNFILLED,    skippedHits.size());
+                retry(skippedHits, result, summaryClass, retryMap);
             }
-        } else {
-            result.getQuery().trace(false, 1, "Summary fetching got " + numSkipped + " empty docsums (of " + numHitsToFill + " hits), no retry");
-            if (shouldLogNoRetry()) {
-                log.log(Level.WARNING, "Docsum fetch failed for " + numSkipped + " hits (" + numOkFilledHits + " ok hits), no retry");
-            }
-            // Declined by the retry limit: these docsums are lost for this query. Recorded as retried=false
-            // rather than left absent, so "considered and declined" is distinguishable from "never needed".
-            Span.current().setAttribute(TraceAttributes.FILL_SKIPPED, numSkipped)
-                          .setAttribute(TraceAttributes.FILL_RETRIED, false);
+            return;
         }
+        Optional<Group> retryGroup = groupToRetryIn(skippedHits, query);
+        if (retryGroup.isPresent()) {
+            result.getQuery().trace(false, 1, "Retry summary fetching for " + numSkipped + " empty docsums (of " +
+                                              numHitsToFill + " hits) in " + retryGroup.get());
+            ListMap<Integer, FastHit> retryMap = new ListMap<>();
+            for (Node node : retryGroup.get().workingNodes()) {
+                if ( ! resourcePool.knownNodeIds().contains(node.key())) continue;
+                for (var hit : skippedHits) {
+                    retryMap.put(node.key(), hit);
+                }
+            }
+            if (retryMap.size() > 0) {
+                if (shouldLogRetry()) {
+                    log.log(Level.INFO, "Retry docsum fetch for " + numSkipped + " hits (" + numOkFilledHits +
+                                        " ok hits) in " + retryGroup.get());
+                }
+                retry(skippedHits, result, summaryClass, retryMap);
+                return;
+            }
+        }
+        result.getQuery().trace(false, 1, "Summary fetching got " + numSkipped + " empty docsums (of " + numHitsToFill + " hits), no retry");
+        if (shouldLogNoRetry()) {
+            log.log(Level.WARNING, "Docsum fetch failed for " + numSkipped + " hits (" + numOkFilledHits + " ok hits), no retry");
+        }
+        // Declined by the retry limit: these docsums are lost for this query. Recorded as retried=false
+        // rather than left absent, so "considered and declined" is distinguishable from "never needed".
+        Span.current().setAttribute(TraceAttributes.FILL_SKIPPED, numSkipped)
+                      .setAttribute(TraceAttributes.FILL_RETRIED, false);
+    }
+
+    /** Sends the skipped hits to the nodes of the given map and waits for the docsums, removing those filled. */
+    private void retry(List<FastHit> skippedHits, Result result, String summaryClass,
+                       ListMap<Integer, FastHit> retryMap) throws InterruptedException {
+        int numSkipped = skippedHits.size();
+        summaryNeedsQuery = true;
+        sendFillRequestByNode(result, summaryClass, retryMap);
+        while (outstandingResponses > 0 && numOkFilledHits < numHitsToFill) {
+            var responseAndHits = getNextResponse(result.getQuery().getTimeLeft());
+            if (responseAndHits == null) {
+                if (shouldLogRetryTimeout()) {
+                    log.log(Level.WARNING, "Timed out waiting for summary data. " + outstandingResponses + " responses outstanding.");
+                }
+                break;
+            }
+            processOneResponse(result, responseAndHits, true);
+            outstandingResponses--;
+        }
+        skippedHits.removeIf(hit -> !partialSummaryHandler.needFill(hit));
+
+        // Span.current() here IS dispatch.fill: FillInvoker.fill -> getFillResults -> processResponses
+        // -> maybeRetry is synchronous on one thread, so the span needs no plumbing to reach.
+        Span.current().setAttribute(TraceAttributes.FILL_SKIPPED,     numSkipped)
+                      .setAttribute(TraceAttributes.FILL_RETRIED,     true)
+                      .setAttribute(TraceAttributes.FILL_RETRY_NODES, retryMap.size())
+                      .setAttribute(TraceAttributes.FILL_UNFILLED,    skippedHits.size());
+    }
+
+    /**
+     * Returns a group, other than those the skipped hits came from, whose nodes together hold a full copy
+     * of the corpus, or empty if a single-group retry should not be done: When disabled, when there is no
+     * such group, or when a content node ran out of time, as retrying would then only add load.
+     */
+    private Optional<Group> groupToRetryIn(List<FastHit> skippedHits, Query query) {
+        if (groups == null || groups.size() < 2) return Optional.empty();
+        if ( ! query.properties().getBoolean(Dispatcher.docsumRetryOtherGroup, true)) return Optional.empty();
+        if (contentNodeTimedOut || query.getTimeLeft() <= 0) return Optional.empty();
+
+        Set<Integer> skippedNodes = new HashSet<>();
+        for (var hit : skippedHits)
+            skippedNodes.add(hit.getDistributionKey());
+        List<Group> candidates = new ArrayList<>();
+        for (Group group : groups.groups()) {
+            if ( ! group.hasSufficientCoverage() || group.workingNodesCount() == 0) continue;
+            if (group.nodes().stream().anyMatch(node -> skippedNodes.contains(node.key()))) continue;
+            candidates.add(group);
+        }
+        if (candidates.isEmpty()) return Optional.empty();
+        return Optional.of(candidates.get(ThreadLocalRandom.current().nextInt(candidates.size())));
     }
 
     private static boolean shouldLogForCount(int count) {

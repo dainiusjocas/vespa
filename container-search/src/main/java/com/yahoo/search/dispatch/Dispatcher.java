@@ -56,12 +56,18 @@ public class Dispatcher extends AbstractComponent {
     private static final String TOP_K_PROBABILITY = "topKProbability";
     private static final String DOCSUM_RETRY_LIMIT = "docsumRetryLimit";
     private static final String DOCSUM_RETRY_FACTOR  = "docsumRetryFactor";
+    private static final String DOCSUM_RETRY_OTHER_GROUP = "docsumRetryOtherGroup";
     private static final int MAX_GROUP_SELECTION_ATTEMPTS = 3;
 
     /** If set will control computation of how many hits will be fetched from each partition.*/
     public static final CompoundName topKProbability = CompoundName.from(DISPATCH + "." + TOP_K_PROBABILITY);
     public static final CompoundName docsumRetryLimit = CompoundName.from(DISPATCH + "." + DOCSUM_RETRY_LIMIT);
     public static final CompoundName docsumRetryFactor  = CompoundName.from(DISPATCH + "." + DOCSUM_RETRY_FACTOR);
+    /**
+     * Whether empty docsums that are too many to retry on every node are instead retried once on the nodes
+     * of a single other group, which holds a full copy of the corpus. Default true.
+     */
+    public static final CompoundName docsumRetryOtherGroup = CompoundName.from(DISPATCH + "." + DOCSUM_RETRY_OTHER_GROUP);
 
     private final InvokerFactoryFactory invokerFactories;
     private final DispatchConfig dispatchConfig;
