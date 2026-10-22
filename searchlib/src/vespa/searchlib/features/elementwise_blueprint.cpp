@@ -3,6 +3,7 @@
 #include "elementwise_blueprint.h"
 
 #include "elementwise_bm25_blueprint.h"
+#include "elementwise_element_similarity_blueprint.h"
 #include "elementwise_matches_blueprint.h"
 #include "elementwise_utils.h"
 
@@ -60,6 +61,7 @@ ElementwiseBlueprint::~ElementwiseBlueprint() = default;
 ElementwiseBlueprint::NestedBlueprints ElementwiseBlueprint::make_default_nested_blueprints() {
     auto nested_blueprints = std::make_shared<NestedBlueprints::element_type>();
     nested_blueprints->emplace("bm25", std::make_shared<ElementwiseBm25Blueprint>());
+    nested_blueprints->emplace("elementSimilarity", std::make_shared<ElementwiseElementSimilarityBlueprint>());
     nested_blueprints->emplace("matches", std::make_shared<ElementwiseMatchesBlueprint>());
     return nested_blueprints;
 }
@@ -86,6 +88,10 @@ bool ElementwiseBlueprint::setup(const fef::IIndexEnvironment& env, const fef::P
     auto        itr = _nested_blueprints->find(nested_feature_base_name);
     if (itr == _nested_blueprints->end()) {
         return fail("'%s' is not a feature with elementwise support", nested_feature_base_name.c_str());
+    }
+    if (!feature_name_parser.output().empty()) {
+        return fail("'%s' selects output '%s', but elementwise does not support named outputs", feature_name.c_str(),
+                    feature_name_parser.output().c_str());
     }
     std::optional<CellType> cell_type;
     if (params.size() > 2) {

@@ -54,7 +54,8 @@ protected:
     std::shared_ptr<Blueprint> make_blueprint() const;
     void expect_setup_fail(const StringVector& params);
     void expect_bm25_setup_succeed(const StringVector& params);
-    void expect_matches_setup_succeed(const StringVector& params, const std::string& exp_type);
+    void expect_setup_succeed(const StringVector& params, const std::string& exp_type);
+    void set_property(const std::string& key, const std::string& value) { index_env.getProperties().add(key, value); }
 };
 
 ElementwiseBlueprintTest::ElementwiseBlueprintTest() : ::testing::Test() {
@@ -91,7 +92,7 @@ void ElementwiseBlueprintTest::expect_bm25_setup_succeed(const StringVector& par
     EXPECT_EQ(StringVector({"score"}), deps.output);
 }
 
-void ElementwiseBlueprintTest::expect_matches_setup_succeed(const StringVector& params, const std::string& exp_type) {
+void ElementwiseBlueprintTest::expect_setup_succeed(const StringVector& params, const std::string& exp_type) {
     SCOPED_TRACE(feature_name(params));
     auto                   blueprint = make_blueprint();
     DummyDependencyHandler deps(*blueprint);
@@ -132,11 +133,11 @@ TEST_F(ElementwiseBlueprintTest, blueprint_setup_succeeds_for_index_field) {
 }
 
 TEST_F(ElementwiseBlueprintTest, matches_blueprint_setup_succeeds_for_array_of_struct_or_map_field) {
-    expect_matches_setup_succeed({"matches(va)", "x"}, "tensor<float>(x{})");
-    expect_matches_setup_succeed({"matches(va)", "x", "double"}, "tensor(x{})");
-    expect_matches_setup_succeed({"matches(va)", "x", "float"}, "tensor<float>(x{})");
-    expect_matches_setup_succeed({"matches(va)", "y", "int8"}, "tensor<int8>(y{})");
-    expect_matches_setup_succeed({"matches(va)", "x", "bfloat16"}, "tensor<bfloat16>(x{})");
+    expect_setup_succeed({"matches(va)", "x"}, "tensor<float>(x{})");
+    expect_setup_succeed({"matches(va)", "x", "double"}, "tensor(x{})");
+    expect_setup_succeed({"matches(va)", "x", "float"}, "tensor<float>(x{})");
+    expect_setup_succeed({"matches(va)", "y", "int8"}, "tensor<int8>(y{})");
+    expect_setup_succeed({"matches(va)", "x", "bfloat16"}, "tensor<bfloat16>(x{})");
 }
 
 TEST_F(ElementwiseBlueprintTest, matches_blueprint_setup_fails_when_parameter_list_is_not_valid) {
@@ -152,6 +153,52 @@ TEST_F(ElementwiseBlueprintTest, matches_blueprint_setup_fails_when_field_is_not
     expect_setup_fail({"matches(iws)", "x"});
     expect_setup_fail({"matches(as)", "x"});
     expect_setup_fail({"matches(aa)", "x"});
+}
+
+TEST_F(ElementwiseBlueprintTest, element_similarity_blueprint_setup_succeeds_for_index_field) {
+    expect_setup_succeed({"elementSimilarity(ia)", "x"}, "tensor(x{})");
+    expect_setup_succeed({"elementSimilarity(ia)", "x", "float"}, "tensor<float>(x{})");
+    expect_setup_succeed({"elementSimilarity(iws)", "y", "bfloat16"}, "tensor<bfloat16>(y{})");
+    expect_setup_succeed({"elementSimilarity(is)", "x", "double"}, "tensor(x{})");
+}
+
+TEST_F(ElementwiseBlueprintTest, element_similarity_blueprint_setup_fails_when_parameter_list_is_not_valid) {
+    expect_setup_fail({"elementSimilarity", "x"});                // wrong parameter number
+    expect_setup_fail({"elementSimilarity(unknown)", "x"});       // unknown field
+    expect_setup_fail({"elementSimilarity(as)", "x"});            // 'as' is an attribute
+    expect_setup_fail({"elementSimilarity(aa)", "x"});            // 'aa' is an attribute
+    expect_setup_fail({"elementSimilarity(ia,iws)", "x"});        // wrong parameter number
+    expect_setup_fail({"elementSimilarity(ia)", "x", "complex"}); // malformed cell type
+}
+
+TEST_F(ElementwiseBlueprintTest, blueprint_setup_fails_when_inner_feature_has_named_output) {
+    expect_setup_fail({"elementSimilarity(ia).proximity", "x"});
+    expect_setup_fail({"elementSimilarity(ia).default", "x"});
+    expect_setup_fail({"bm25(ia).score", "x"});
+}
+
+TEST_F(ElementwiseBlueprintTest, element_similarity_blueprint_uses_nested_output_expression) {
+    set_property("elementSimilarity(ia).output.default", "sum(q*w)");
+    expect_setup_succeed({"elementSimilarity(ia)", "x", "float"}, "tensor<float>(x{})");
+    set_property("elementSimilarity(iws).output.default", "q");
+    expect_setup_fail({"elementSimilarity(iws)", "x", "float"}); // missing aggregator
+}
+
+TEST_F(ElementwiseBlueprintTest, element_similarity_blueprint_setup_fails_when_output_expression_is_bad) {
+    set_property("elementwise(elementSimilarity(ia),x,float).output.default", "p");
+    set_property("elementwise(elementSimilarity(ia),y,float).output.default", "bogus(p)");
+    set_property("elementwise(elementSimilarity(ia),z,float).output.default", "max(bogus)");
+    set_property("elementwise(elementSimilarity(ia),w,float).output.default", "max(w+)");
+    expect_setup_fail({"elementSimilarity(ia)", "x", "float"}); // missing aggregator
+    expect_setup_fail({"elementSimilarity(ia)", "y", "float"}); // unknown aggregator
+    expect_setup_fail({"elementSimilarity(ia)", "z", "float"}); // unknown symbol
+    expect_setup_fail({"elementSimilarity(ia)", "w", "float"}); // malformed expression
+    expect_setup_succeed({"elementSimilarity(ia)", "x", "double"}, "tensor(x{})");
+}
+
+TEST_F(ElementwiseBlueprintTest, element_similarity_blueprint_property_keys_contain_default_cell_type) {
+    set_property("elementwise(elementSimilarity(ia),x,double).output.default", "bogus(p)");
+    expect_setup_fail({"elementSimilarity(ia)", "x"});
 }
 
 class ElementwiseMatchesExecutorTest : public ::testing::Test {

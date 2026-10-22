@@ -1,4 +1,6 @@
 // Copyright Vespa.ai. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
+#include <vespa/eval/eval/tensor_spec.h>
+#include <vespa/eval/eval/value_codec.h>
 #include <vespa/searchlib/features/element_similarity_feature.h>
 #include <vespa/searchlib/features/setup.h>
 #include <vespa/searchlib/fef/test/dummy_dependency_handler.h>
@@ -10,11 +12,14 @@
 #include <vespa/vespalib/util/stringfmt.h>
 
 #include <initializer_list>
+#include <limits>
 
 using namespace search::fef;
 using namespace search::fef::test;
 using namespace search::features;
 using CollectionType = FieldInfo::CollectionType;
+using vespalib::eval::TensorSpec;
+using vespalib::eval::spec_from_value;
 
 const std::string DEFAULT = "elementSimilarity(foo)";
 const std::string PROXIMITY = "elementSimilarity(foo).proximity";
@@ -89,6 +94,26 @@ struct RankFixture : BlueprintFactoryFixture {
         RankResult actual;
         EXPECT_TRUE(ft.executeOnly(actual, 1));
         return actual.getScore(select);
+    }
+};
+
+struct ElementwiseRankFixture : BlueprintFactoryFixture {
+    CollectionType collection_type;
+    explicit ElementwiseRankFixture(CollectionType collection_type_in = CollectionType::WEIGHTEDSET)
+        : BlueprintFactoryFixture(), collection_type(collection_type_in) {}
+    TensorSpec get_tensor(const FtQuery& query, const FtIndex& index, const IndexFixture& idx_env = IndexFixture(),
+                          const std::string& feature = "elementwise(elementSimilarity(foo),x,double)") {
+        FtFeatureTest ft(factory, feature);
+        ft.getIndexEnv().getBuilder().addField(FieldType::INDEX, collection_type, "foo");
+        ft.getIndexEnv().getBuilder().getIndexEnv().getProperties().import(idx_env.indexEnv.getProperties());
+        FtTestAppBase::FT_SETUP(ft, query, index, 1);
+        auto stale = spec_from_value(ft.resolveObjectFeature(2));
+        EXPECT_EQ(0u, stale.cells().size());
+        return spec_from_value(ft.resolveObjectFeature(1));
+    }
+    TensorSpec get_tensor(const std::string& query, const FtIndex& index, const IndexFixture& idx_env = IndexFixture(),
+                          const std::string& feature = "elementwise(elementSimilarity(foo),x,double)") {
+        return get_tensor(FtUtil::toQuery(query), index, idx_env, feature);
     }
 };
 
@@ -414,6 +439,86 @@ TEST(ElementSimilarityFeatureTest, require_that_element_demultiplexing_works) {
               f1.get_feature("x y z t",
                              indexFoo().element("x").element("x y").element("x z").element("y").element("x z"),
                              DEFAULT, f2));
+}
+
+TensorSpec make_tensor(const std::vector<std::pair<uint32_t, double>>& cells,
+                       const std::string&                            type = "tensor(x{})") {
+    TensorSpec spec(type);
+    for (const auto& cell : cells) {
+        spec.add({{"x", std::to_string(cell.first)}}, cell.second);
+    }
+    return spec;
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_no_match_gives_empty_tensor) {
+    ElementwiseRankFixture f1;
+    EXPECT_EQ(make_tensor({}), f1.get_tensor("x", indexFoo().element("y")));
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_query_terms_without_weight_gives_empty_tensor) {
+    ElementwiseRankFixture f1;
+    FtQuery                query({FtQueryTerm("x", 0)});
+    EXPECT_EQ(make_tensor({}), f1.get_tensor(query, indexFoo().element("x y").element("x")));
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_array_field_is_supported) {
+    ElementwiseRankFixture f1(CollectionType::ARRAY);
+    IndexFixture           f2;
+    f2.set("elementwise(elementSimilarity(foo),x,double).output.default", "max(f*w)");
+    EXPECT_EQ(make_tensor({{0, 0.5}, {2, 1.0}}),
+              f1.get_tensor("x", indexFoo().element("x y").element("y").element("x"), f2));
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_each_matching_element_gets_its_own_default_score) {
+    ElementwiseRankFixture f1;
+    double score0 = mix(comb({prox(1), prox(3), prox(2)}), comb({1.0, 0.0, 1.0}), 4.0 / 5.0, 4.0 / 7.0);
+    EXPECT_EQ(make_tensor({{0, score0}, {2, 2.0}, {3, 3.0 * mix(prox(2), 1.0, 1.0 / 5.0, 1.0 / 2.0)}}),
+              f1.get_tensor("a b c d e", indexFoo()
+                                             .element("a c x x b x d")
+                                             .element("x y")
+                                             .element("a b c d e", 2)
+                                             .element("e x", 3)));
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_max_over_elements_matches_element_similarity_feature) {
+    ElementwiseRankFixture f1;
+    RankFixture            f2;
+    auto                   index = indexFoo().element("a c x x b x d").element("a b", 3).element("x e d");
+    double                 max_score = -std::numeric_limits<double>::infinity();
+    for (const auto& cell : f1.get_tensor("a b c d e", index).cells()) {
+        max_score = std::max(max_score, cell.second.value);
+    }
+    EXPECT_EQ(f2.get_feature("a b c d e", index, DEFAULT), max_score);
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_element_demultiplexing_works) {
+    ElementwiseRankFixture f1;
+    IndexFixture           f2;
+    f2.set("elementSimilarity(foo).output.default", "sum(q)");
+    EXPECT_EQ(make_tensor({{0, 0.25}, {1, 0.5}, {2, 0.5}, {3, 0.25}, {4, 0.5}}),
+              f1.get_tensor("x y z t",
+                            indexFoo().element("x").element("x y").element("x z").element("y").element("x z"), f2));
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_elementwise_output_expression_overrides_nested_one) {
+    ElementwiseRankFixture f1;
+    IndexFixture           f2;
+    f2.set("elementSimilarity(foo).output.default", "sum(q)");
+    f2.set("elementwise(elementSimilarity(foo),x,double).output.default", "max(w+f)");
+    EXPECT_EQ(make_tensor({{0, 5.5}, {1, 4.0}}),
+              f1.get_tensor("x", indexFoo().element("x y", 5).element("x", 3).element("y"), f2));
+}
+
+TEST(ElementwiseElementSimilarityFeatureTest, require_that_cell_type_is_respected) {
+    ElementwiseRankFixture f1;
+    IndexFixture           f2;
+    f2.set("elementwise(elementSimilarity(foo),y,float).output.default", "max(w)");
+    EXPECT_EQ(make_tensor({}, "tensor<float>(y{})"),
+              f1.get_tensor("x", indexFoo().element("y"), f2, "elementwise(elementSimilarity(foo),y,float)"));
+    TensorSpec expected("tensor<float>(y{})");
+    expected.add({{"y", "0"}}, 5.0).add({{"y", "1"}}, 3.0);
+    EXPECT_EQ(expected, f1.get_tensor("x", indexFoo().element("x y", 5).element("x", 3), f2,
+                                      "elementwise(elementSimilarity(foo),y,float)"));
 }
 
 GTEST_MAIN_RUN_ALL_TESTS()

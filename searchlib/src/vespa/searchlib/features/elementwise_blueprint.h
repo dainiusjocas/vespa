@@ -21,9 +21,17 @@ namespace search::features {
  * e.g. both elementwise(bm25(i),x) and elementwise(bm25(i),x,double) pass (i,x,double) to the inner elementwise
  * bm25 blueprint. Rank property keys used for tuning must therefore always contain the cell type name.
  *
+ * Only the default output of the inner feature is supported, e.g. elementwise(elementSimilarity(i).proximity,x) is
+ * rejected.
+ *
  * Supported inner features:
  *   - bm25: elementwise bm25 score per element of index field i, e.g. elementwise(bm25(i),x).
  *     Default cell type is 'double'.
+ *   - elementSimilarity: elementwise element similarity score per element of index field i,
+ *     e.g. elementwise(elementSimilarity(i),x). Default cell type is 'double'. The per-element expression is
+ *     looked up in this order: 'elementwise(elementSimilarity(i),x,double).output.default',
+ *     'elementSimilarity(i).output.default', then the built-in default. The value has the form
+ *     'aggregator(expression)'; the aggregator is validated but ignored, since there is one score per element.
  *   - matches: 1.0 for each element id matched by sameElement in an array of struct or map field f,
  *     e.g. elementwise(matches(f),x). Default cell type is 'float', since the values are always 1.0.
  */

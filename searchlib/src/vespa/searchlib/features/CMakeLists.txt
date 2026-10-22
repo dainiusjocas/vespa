@@ -22,10 +22,13 @@ vespa_add_library(searchlib_features OBJECT
     distancetopathfeature.cpp
     dotproductfeature.cpp
     element_completeness_feature.cpp
+    element_similarity_calculator.cpp
     element_similarity_feature.cpp
     elementwise_blueprint.cpp
     elementwise_bm25_blueprint.cpp
     elementwise_bm25_executor.cpp
+    elementwise_element_similarity_blueprint.cpp
+    elementwise_element_similarity_executor.cpp
     elementwise_matches_blueprint.cpp
     elementwise_matches_executor.cpp
     elementwise_output.cpp

@@ -2,7 +2,7 @@
 
 #include "element_similarity_feature.h"
 
-#include "element_similarity_state.h"
+#include "element_similarity_calculator.h"
 
 #include <vespa/eval/eval/llvm/compile_cache.h>
 #include <vespa/eval/eval/llvm/compiled_function.h>
@@ -94,172 +94,39 @@ using OutputSpec = std::pair<function_5, Aggregator::UP>;
 
 //-----------------------------------------------------------------------------
 
-struct VectorizedQueryTerms {
-    struct Term {
-        fef::TermFieldHandle handle;
-        int                  weight;
-
-        Term(fef::TermFieldHandle handle_in, int weight_in) : handle(handle_in), weight(weight_in) {}
-    };
-
-    std::vector<fef::TermFieldHandle> handles;
-    std::vector<int>                  weights;
-    int                               total_weight;
-
-    VectorizedQueryTerms(const VectorizedQueryTerms&) = delete;
-
-    VectorizedQueryTerms(VectorizedQueryTerms&& rhs)
-        : handles(std::move(rhs.handles)), weights(std::move(rhs.weights)), total_weight(rhs.total_weight) {}
-
-    VectorizedQueryTerms(const fef::IQueryEnvironment& env, uint32_t field_id)
-        : handles(), weights(), total_weight(0) {
-        std::vector<Term> terms;
-        for (uint32_t i = 0; i < env.getNumTerms(); ++i) {
-            const fef::ITermData* termData = env.getTerm(i);
-            if (termData->getWeight().percent() != 0) { // only consider query terms with contribution
-                using FRA = fef::ITermFieldRangeAdapter;
-                for (FRA iter(*termData); iter.valid(); iter.next()) {
-                    const fef::ITermFieldData& tfd = iter.get();
-                    if (tfd.getFieldId() == field_id) {
-                        int term_weight = termData->getWeight().percent();
-                        total_weight += term_weight;
-                        terms.push_back(Term(tfd.getHandle(), term_weight));
-                    }
-                }
-            }
-        }
-        handles.reserve(terms.size());
-        weights.reserve(terms.size());
-        for (size_t i = 0; i < terms.size(); ++i) {
-            handles.push_back(terms[i].handle);
-            weights.push_back(terms[i].weight);
-        }
-    }
-
-    ~VectorizedQueryTerms();
-};
-
-VectorizedQueryTerms::~VectorizedQueryTerms() = default;
-
-//-----------------------------------------------------------------------------
-
-//-----------------------------------------------------------------------------
-
 class ElementSimilarityExecutor : public fef::FeatureExecutor {
 private:
-    using ITR = fef::TermFieldMatchData::PositionsIterator;
-
-    struct CmpPosition {
-        ITR* pos;
-
-        CmpPosition(ITR* pos_in) : pos(pos_in) {}
-
-        bool operator()(uint16_t a, uint16_t b) {
-            return (pos[a]->getPosition() == pos[b]->getPosition()) ? (a < b)
-                                                                    : (pos[a]->getPosition() < pos[b]->getPosition());
-        }
-    };
-
-    struct CmpElement {
-        ITR* pos;
-
-        CmpElement(ITR* pos_in) : pos(pos_in) {}
-
-        bool operator()(uint16_t a, uint16_t b) { return pos[a]->getElementId() < pos[b]->getElementId(); }
-    };
-
-    using PositionQueue = vespalib::PriorityQueue<uint16_t, CmpPosition>;
-    using ElementQueue = vespalib::PriorityQueue<uint16_t, CmpElement>;
-
-    VectorizedQueryTerms    _terms;
-    std::vector<ITR>        _pos;
-    std::vector<ITR>        _end;
-    PositionQueue           _position_queue;
-    ElementQueue            _element_queue;
-    std::vector<OutputSpec> _outputs;
-    const fef::MatchData*   _md;
+    ElementSimilarityCalculator _calculator;
+    std::vector<OutputSpec>     _outputs;
 
 public:
-    ElementSimilarityExecutor(VectorizedQueryTerms&& terms, std::vector<OutputSpec>&& outputs_in);
+    ElementSimilarityExecutor(const fef::IQueryEnvironment& env, uint32_t field_id,
+                              std::vector<OutputSpec>&& outputs_in);
     ~ElementSimilarityExecutor() override;
 
-    bool isPure() override { return _terms.handles.empty(); }
+    bool isPure() override { return !_calculator.has_terms(); }
 
-    void handle_bind_match_data(const fef::MatchData& md) override { _md = &md; }
-
-    // take the front term in the position queue,
-    // iterate to its next element (or end), and
-    // put it back into the element queue if possible
-    void requeue_pos_front(uint32_t element) {
-        uint16_t term = _position_queue.front();
-        _position_queue.pop_front();
-        while (_pos[term] != _end[term] && (_pos[term]->getElementId() == element)) {
-            ++_pos[term];
-        }
-        if (_pos[term] != _end[term]) {
-            _element_queue.push(term);
-        }
-    }
+    void handle_bind_match_data(const fef::MatchData& md) override { _calculator.bind_match_data(md); }
 
     void execute(uint32_t docId) override {
         for (auto& output : _outputs) {
             output.second->clear();
         }
-        for (size_t i = 0; i < _terms.handles.size(); ++i) {
-            const fef::TermFieldMatchData* tfmd = _md->resolveTermField(_terms.handles[i]);
-            if (tfmd->has_ranking_data(docId)) {
-                _pos[i] = tfmd->begin();
-                _end[i] = tfmd->end();
-                if (_pos[i] != _end[i]) {
-                    _element_queue.push(i);
-                }
-            }
-        }
-        while (!_element_queue.empty()) {
-            uint32_t elementId = _pos[_element_queue.front()]->getElementId();
-            while (!_element_queue.empty() && _pos[_element_queue.front()]->getElementId() == elementId) {
-                _position_queue.push(_element_queue.front());
-                _element_queue.pop_front();
-            }
-            uint16_t               first = _position_queue.front();
-            ElementSimilarityState state(_pos[first]->getElementLen(), _pos[first]->getElementWeight(),
-                                         _pos[first]->getPosition(), _terms.weights[first], first);
-            requeue_pos_front(elementId);
-            while (!_position_queue.empty()) {
-                uint16_t item = _position_queue.front();
-                if (state.want_match(_pos[item]->getPosition())) {
-                    state.addMatch(_pos[item]->getPosition(), _terms.weights[item], item);
-                    requeue_pos_front(elementId);
-                } else {
-                    ++_pos[item];
-                    if (_pos[item] == _end[item] || _pos[item]->getElementId() != elementId) {
-                        requeue_pos_front(elementId);
-                    } else {
-                        _position_queue.adjust();
-                    }
-                }
-            }
-            state.calculate_scores(_terms.total_weight);
+        _calculator.calculate(docId, [this](uint32_t, const ElementSimilarityState& state) {
             for (auto& output : _outputs) {
                 output.second->add(output.first(state.proximity, state.order, state.query_coverage,
                                                 state.field_coverage, state.element_weight));
             }
-        }
+        });
         for (size_t i = 0; i < _outputs.size(); ++i) {
             outputs().set_number(i, _outputs[i].second->get());
         }
     }
 };
 
-ElementSimilarityExecutor::ElementSimilarityExecutor(VectorizedQueryTerms&&    terms,
-                                                     std::vector<OutputSpec>&& outputs_in)
-    : _terms(std::move(terms)),
-      _pos(_terms.handles.size(), nullptr),
-      _end(_terms.handles.size(), nullptr),
-      _position_queue(CmpPosition(_pos.data())),
-      _element_queue(CmpElement(_pos.data())),
-      _outputs(std::move(outputs_in)),
-      _md(nullptr) {
+ElementSimilarityExecutor::ElementSimilarityExecutor(const fef::IQueryEnvironment& env, uint32_t field_id,
+                                                     std::vector<OutputSpec>&&     outputs_in)
+    : _calculator(env, field_id), _outputs(std::move(outputs_in)) {
 }
 ElementSimilarityExecutor::~ElementSimilarityExecutor() = default;
 
@@ -291,7 +158,8 @@ std::vector<std::pair<std::string, std::string>> extract_properties(const fef::P
 
 std::vector<std::pair<std::string, std::string>> get_outputs(const fef::Properties& props,
                                                              const std::string&     feature) {
-    return extract_properties(props, feature + ".output", "default", "max((0.35*p+0.15*o+0.30*q+0.20*f)*w)");
+    return extract_properties(props, feature + ".output", "default",
+                              ElementSimilarityCalculator::default_output_expression());
 }
 
 } // namespace
@@ -355,8 +223,7 @@ bool ElementSimilarityBlueprint::setup(const fef::IIndexEnvironment& env, const 
             LOG(warning, "'%s': unknown aggregator '%s'", fnb.buildName().c_str(), aggr_name.c_str());
             return false;
         }
-        std::vector<std::string> args({"p", "o", "q", "f", "w"});
-        auto                     function = vespalib::eval::Function::parse(args, expr);
+        auto function = vespalib::eval::Function::parse(ElementSimilarityCalculator::expression_params(), expr);
         if (function->has_error()) {
             LOG(warning, "'%s': per-element expression parse error: %s", fnb.buildName().c_str(),
                 function->get_error().c_str());
@@ -374,7 +241,7 @@ fef::FeatureExecutor& ElementSimilarityBlueprint::createExecutor(const fef::IQue
         output_specs.emplace_back(output->compile_token->get().get_function<5>(),
                                   output->aggregator_factory->create());
     }
-    return stash.create<ElementSimilarityExecutor>(VectorizedQueryTerms(env, _field_id), std::move(output_specs));
+    return stash.create<ElementSimilarityExecutor>(env, _field_id, std::move(output_specs));
 }
 
 } // namespace search::features

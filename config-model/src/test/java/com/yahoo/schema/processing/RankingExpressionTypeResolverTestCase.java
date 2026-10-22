@@ -740,6 +740,38 @@ public class RankingExpressionTypeResolverTestCase {
                      summaryFeatures(profile).get("elementwise(bm25(chunks),x)").type(context));
     }
 
+    @Test
+    void elementwiseElementSimilarityTypeIsResolved() throws Exception {
+        ApplicationBuilder builder = new ApplicationBuilder();
+        builder.addSchema(joinLines(
+                "schema test {",
+                "  document test { ",
+                "    field tags type array<string> {",
+                "      indexing: index | summary",
+                "    }",
+                "  }",
+                "  rank-profile my_rank_profile {",
+                "    function my_func() {",
+                "      expression: reduce(elementwise(elementSimilarity(tags),offset,float), max)",
+                "    }",
+                "    first-phase {",
+                "      expression: my_func",
+                "    }",
+                "    summary-features {",
+                "      elementwise(elementSimilarity(tags),offset,float)",
+                "      elementwise(elementSimilarity(tags),x)",
+                "    }",
+                "  }",
+                "}"));
+        builder.build(true);
+        RankProfile profile = builder.getRankProfileRegistry().get(builder.getSchema(), "my_rank_profile");
+        var context = profile.typeContext(builder.getQueryProfileRegistry());
+        assertEquals(TensorType.fromSpec("tensor<float>(offset{})"),
+                     summaryFeatures(profile).get("elementwise(elementSimilarity(tags),offset,float)").type(context));
+        assertEquals(TensorType.fromSpec("tensor(x{})"),
+                     summaryFeatures(profile).get("elementwise(elementSimilarity(tags),x)").type(context));
+    }
+
     private Map<String, ReferenceNode> summaryFeatures(RankProfile profile) {
         return profile.getSummaryFeatures().stream().collect(Collectors.toMap(f -> f.toString(), f -> f));
     }
