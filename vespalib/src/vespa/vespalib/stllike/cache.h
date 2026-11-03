@@ -119,6 +119,8 @@ template <typename P> class cache {
         // has been std::move()'d away and it is now in a logically empty state).
         // Otherwise, both the mapping and `value` remains unmodified and false is returned.
         [[nodiscard]] bool try_replace_and_update_size(const KeyT& key, ValueT& value);
+        // As try_replace_and_update_size(), but does _not_ update the LRU ordering.
+        [[nodiscard]] bool try_replace_no_ref_and_update_size(const KeyT& key, ValueT& value);
         // Iff `key` was present in the mapping prior to the call, its entry is removed
         // from the mapping and true is returned. Otherwise, the mapping remains unmodified
         // and false is returned.
@@ -301,6 +303,19 @@ public:
      * Object is then put at head of LRU list.
      */
     void write(const K& key, V value);
+
+    /**
+     * Iff an object with the given key exists in the cache, replace its value with `value`
+     * and return true. Otherwise, the cache is left untouched (nothing is inserted) and
+     * false is returned. The backing store is never written to.
+     *
+     * Unlike write(), the LRU position of the replaced entry is preserved (it is _not_ moved
+     * to the head of the LRU list), it stays in the segment it already resides in (no SLRU
+     * promotion), and the LFU frequency sketch is not updated. This lets callers keep a cached
+     * entry fresh on modification without that modification being mistaken for access.
+     * Size accounting is adjusted for the size delta between the old and new value.
+     */
+    bool replaceIfPresent(const K& key, V value);
 
     /**
      * Tell if an object with given key exists in the cache.

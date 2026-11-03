@@ -270,6 +270,61 @@ TEST_F(CacheTest, fetching_element_moves_it_to_head_of_lru_list) {
     EXPECT_TRUE(cache.hasKey(4));
 }
 
+TEST_F(CacheTest, replace_if_present_replaces_value_and_updates_size_without_touching_lru_or_store) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, -1);
+    cache.maxElements(3);
+    cache.write(1, "15 bytes string");
+    cache.write(2, "bar");
+    cache.write(3, "baz");
+    EXPECT_EQ(cache.dump_segment_keys_in_lru_order(CacheSegment::Probationary), (std::vector<uint32_t>{3, 2, 1}));
+    const size_t bytes_before = cache.sizeBytes();
+    const size_t writes_before = cache.getWrite();
+
+    EXPECT_TRUE(cache.replaceIfPresent(1, "10 bytes s")); // 5 bytes smaller
+    EXPECT_EQ(bytes_before - 5, cache.sizeBytes());
+    EXPECT_TRUE(cache.replaceIfPresent(1, "20 bytes string ssss")); // 10 bytes larger than original
+    EXPECT_EQ(bytes_before + 5, cache.sizeBytes());
+    EXPECT_EQ(3u, cache.size());
+    EXPECT_EQ(writes_before, cache.getWrite());
+    EXPECT_EQ(m[1], "15 bytes string"); // Backing store is not written to
+    // LRU order is unchanged; 1 is still the oldest entry
+    EXPECT_EQ(cache.dump_segment_keys_in_lru_order(CacheSegment::Probationary), (std::vector<uint32_t>{3, 2, 1}));
+    EXPECT_EQ(cache.read(1), "20 bytes string ssss");
+
+    // read() above moved 1 to the head; replacing again keeps it there and 2 is evicted next
+    EXPECT_TRUE(cache.replaceIfPresent(3, "qux"));
+    EXPECT_EQ(cache.dump_segment_keys_in_lru_order(CacheSegment::Probationary), (std::vector<uint32_t>{1, 3, 2}));
+    cache.write(4, "zoid");
+    EXPECT_FALSE(cache.hasKey(2));
+    EXPECT_TRUE(cache.hasKey(3));
+    EXPECT_EQ(cache.read(3), "qux");
+}
+
+TEST_F(CacheTest, replace_if_present_on_absent_key_does_not_insert_or_change_stats) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, -1);
+    cache.write(1, "foo");
+    const auto   stats_before = cache.get_stats();
+    const size_t bytes_before = cache.sizeBytes();
+    const size_t inserts_before = cache.getInsert();
+    const size_t writes_before = cache.getWrite();
+    const size_t lookups_before = cache.getLookup();
+
+    EXPECT_FALSE(cache.replaceIfPresent(2, "bar"));
+    EXPECT_EQ(1u, cache.size());
+    EXPECT_EQ(bytes_before, cache.sizeBytes());
+    EXPECT_FALSE(m.contains(2)); // Backing store is not written to
+    EXPECT_EQ(inserts_before, cache.getInsert());
+    EXPECT_EQ(writes_before, cache.getWrite());
+    EXPECT_EQ(lookups_before, cache.getLookup());
+    const auto stats_after = cache.get_stats();
+    EXPECT_EQ(stats_before.hits, stats_after.hits);
+    EXPECT_EQ(stats_before.misses, stats_after.misses);
+    EXPECT_EQ(stats_before.elements, stats_after.elements);
+    EXPECT_EQ(stats_before.memory_used, stats_after.memory_used);
+    EXPECT_EQ(stats_before.invalidations, stats_after.invalidations);
+    EXPECT_FALSE(cache.hasKey(2));
+}
+
 struct SlruCacheTest : CacheTest {
     template <typename C>
     void assert_segment_capacity_bytes(const C& cache, size_t exp_probationary, size_t exp_protected) {
@@ -406,6 +461,25 @@ TEST_F(SlruCacheTest, write_through_updates_correct_segment) {
     EXPECT_NO_FATAL_FAILURE(assert_segment_sizes(cache, 0, 0));
     EXPECT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 0, 0));
     EXPECT_FALSE(m.contains(2));
+}
+
+TEST_F(SlruCacheTest, replace_if_present_updates_entry_in_its_current_segment_without_reordering) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, -1, -1);
+    cache.write(1, "foo");
+    cache.write(2, "zoid");
+    cache.write(3, "bar");
+    EXPECT_EQ(cache.read(1), "foo"); // --> protected
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2}, {1}));
+    EXPECT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 84 + 83, 83));
+
+    EXPECT_TRUE(cache.replaceIfPresent(1, "foo with more bytes")); // in protected
+    EXPECT_TRUE(cache.replaceIfPresent(2, "z"));                   // in probationary, oldest
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2}, {1}));
+    EXPECT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 81 + 83, 99));
+    EXPECT_FALSE(cache.replaceIfPresent(4, "nope"));
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2}, {1}));
+    EXPECT_EQ(m[1], "foo");
+    EXPECT_EQ(m[2], "zoid");
 }
 
 TEST_F(SlruCacheTest, cache_invalidations_update_correct_segment) {

@@ -181,12 +181,16 @@ std::unique_ptr<document::Document> DocumentStore::read(DocumentIdT lid, const D
     return std::unique_ptr<document::Document>();
 }
 
-void DocumentStore::writeThroughCache(uint64_t syncToken, DocumentIdT lid, const vespalib::nbostream& stream) {
+Value DocumentStore::makeCacheValue(uint64_t syncToken, const vespalib::nbostream& stream) const {
     Value                value(syncToken);
     vespalib::DataBuffer buf(stream.size());
     buf.writeBytes(stream.peek(), stream.size());
     value.set(std::move(buf), stream.size(), _store->getCompression());
-    _cache->write(lid, std::move(value)); // Writes to both cache and backing store
+    return value;
+}
+
+void DocumentStore::writeThroughCache(uint64_t syncToken, DocumentIdT lid, const vespalib::nbostream& stream) {
+    _cache->write(lid, makeCacheValue(syncToken, stream)); // Writes to both cache and backing store
 }
 
 void DocumentStore::write(uint64_t syncToken, DocumentIdT lid, const document::Document& doc) {
@@ -207,6 +211,16 @@ void DocumentStore::write(uint64_t syncToken, DocumentIdT lid, const vespalib::n
                 writeThroughCache(syncToken, lid, stream);
             } else {
                 _backingStore.write(syncToken, lid, stream.peek(), stream.size());
+            }
+            break;
+        case Config::UpdateStrategy::UPDATE_IF_PRESENT:
+            _backingStore.write(syncToken, lid, stream.peek(), stream.size());
+            // Refresh the value of a cached lid in place, preserving its LRU position so that feeding
+            // (e.g. reindexing) does not evict the query-driven hot set. A lid that is not cached is
+            // left uncached, exactly as with INVALIDATE. The hasKey() precheck avoids compressing a
+            // value that would be thrown away; replaceIfPresent() re-checks presence atomically.
+            if (_cache->hasKey(lid)) {
+                (void)_cache->replaceIfPresent(lid, makeCacheValue(syncToken, stream));
             }
             break;
         }

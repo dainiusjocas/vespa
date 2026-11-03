@@ -149,6 +149,8 @@ DocumentStore::Config::UpdateStrategy derive(ProtonConfig::Summary::Cache::Updat
         return DocumentStore::Config::UpdateStrategy::INVALIDATE;
     case ProtonConfig::Summary::Cache::UpdateStrategy::UPDATE:
         return DocumentStore::Config::UpdateStrategy::UPDATE;
+    case ProtonConfig::Summary::Cache::UpdateStrategy::UPDATE_IF_PRESENT:
+        return DocumentStore::Config::UpdateStrategy::UPDATE_IF_PRESENT;
     }
     return DocumentStore::Config::UpdateStrategy::INVALIDATE;
 }

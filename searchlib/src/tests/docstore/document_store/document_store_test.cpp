@@ -105,9 +105,10 @@ std::unique_ptr<document::DocumentTypeRepo> make_test_repo() {
     return std::make_unique<document::DocumentTypeRepo>(builder.config());
 }
 
-std::unique_ptr<document::Document> make_test_doc(const document::DocumentTypeRepo& test_repo) {
+std::unique_ptr<document::Document> make_test_doc(const document::DocumentTypeRepo& test_repo,
+                                                  const std::string&                id = "id:ns:test::1") {
     return std::make_unique<document::Document>(test_repo, *test_repo.getDocumentType("test"),
-                                                document::DocumentId("id:ns:test::1"));
+                                                document::DocumentId(id));
 }
 
 } // namespace
@@ -166,12 +167,140 @@ TEST(DocumentStoreTest, require_that_move_works_when_cache_is_disabled) {
     EXPECT_EQ(2u, backing_store._reads);
 }
 
+namespace {
+
+using UpdateStrategy = DocumentStore::Config::UpdateStrategy;
+
+struct UpdateStrategyFixture {
+    std::unique_ptr<document::DocumentTypeRepo> test_repo;
+    MemoryDataStore                             backing_store;
+    DocumentStore                               store;
+    uint64_t                                    serial_num;
+
+    UpdateStrategyFixture(UpdateStrategy strategy, size_t max_cache_bytes = 100000)
+        : test_repo(make_test_repo()),
+          backing_store(),
+          store(DocumentStore::Config(CompressionConfig::NONE, max_cache_bytes).updateStrategy(strategy),
+                backing_store),
+          serial_num(0) {}
+    ~UpdateStrategyFixture();
+    void write(uint32_t lid, const std::string& id) {
+        store.write(++serial_num, lid, *make_test_doc(*test_repo, id));
+    }
+    std::string read_id(uint32_t lid) {
+        auto doc = store.read(lid, *test_repo);
+        return doc ? doc->getId().toString() : std::string();
+    }
+    // Returns true iff reading `lid` was served from the cache.
+    bool read_is_cache_hit(uint32_t lid) {
+        uint32_t reads_before = backing_store._reads;
+        (void)read_id(lid);
+        return backing_store._reads == reads_before;
+    }
+};
+
+UpdateStrategyFixture::~UpdateStrategyFixture() = default;
+
+void verify_rewrite_of_cached_lid(UpdateStrategy strategy, bool exp_hit) {
+    UpdateStrategyFixture f(strategy);
+    f.write(1, "id:ns:test::old");
+    EXPECT_EQ("id:ns:test::old", f.read_id(1)); // Cache miss, warms the cache
+    EXPECT_EQ(1u, f.backing_store._reads);
+    f.write(1, "id:ns:test::new");
+    uint32_t hits_before = f.store.getCacheStats().hits;
+    EXPECT_EQ("id:ns:test::new", f.read_id(1));
+    EXPECT_EQ(exp_hit ? 1u : 2u, f.backing_store._reads);
+    EXPECT_EQ(exp_hit ? hits_before + 1 : hits_before, f.store.getCacheStats().hits);
+    EXPECT_EQ(1u, f.store.getCacheStats().elements);
+}
+
+void verify_write_of_uncached_lid(UpdateStrategy strategy) {
+    UpdateStrategyFixture f(strategy);
+    f.write(1, "id:ns:test::1");
+    EXPECT_EQ(0u, f.store.getCacheStats().elements); // Write never inserts into the cache
+    EXPECT_EQ("id:ns:test::1", f.read_id(1));
+    EXPECT_EQ(1u, f.backing_store._reads); // Cache miss
+    EXPECT_EQ(0u, f.store.getCacheStats().hits);
+}
+
+/*
+ * Warm lid 1 then lid 2 (so 1 is older), rewrite lid 1, then read fresh lids until the cache
+ * evicts exactly one entry. Returns whether `probe_lid` (1 or 2) is still cached at that point.
+ * Only a single lid is probed per run, since probing an evicted lid reinserts it and evicts another.
+ */
+bool is_cached_after_rewrite_and_first_eviction(UpdateStrategy strategy, uint32_t probe_lid) {
+    UpdateStrategyFixture f(strategy, 1000);
+    f.write(1, "id:ns:test::1");
+    f.write(2, "id:ns:test::2");
+    (void)f.read_id(1);
+    (void)f.read_id(2);
+    EXPECT_EQ(2u, f.store.getCacheStats().elements);
+    f.write(1, "id:ns:test::1-rewritten");
+    EXPECT_EQ(2u, f.store.getCacheStats().elements);
+    bool evicted = false;
+    for (uint32_t lid = 3; lid < 1000 && !evicted; ++lid) {
+        f.write(lid, "id:ns:test::" + std::to_string(lid));
+        size_t elements_before = f.store.getCacheStats().elements;
+        (void)f.read_id(lid);
+        size_t elements_after = f.store.getCacheStats().elements;
+        EXPECT_GE(elements_after + 1, elements_before); // At most one entry is evicted per insert
+        evicted = (elements_after <= elements_before);
+    }
+    EXPECT_TRUE(evicted);
+    return f.read_is_cache_hit(probe_lid);
+}
+
+} // namespace
+
+TEST(DocumentStoreTest, rewrite_of_cached_lid_with_invalidate_strategy_causes_cache_miss) {
+    verify_rewrite_of_cached_lid(UpdateStrategy::INVALIDATE, false);
+}
+
+TEST(DocumentStoreTest, rewrite_of_cached_lid_with_update_strategy_is_cache_hit_with_new_content) {
+    verify_rewrite_of_cached_lid(UpdateStrategy::UPDATE, true);
+}
+
+TEST(DocumentStoreTest, rewrite_of_cached_lid_with_update_if_present_strategy_is_cache_hit_with_new_content) {
+    verify_rewrite_of_cached_lid(UpdateStrategy::UPDATE_IF_PRESENT, true);
+}
+
+TEST(DocumentStoreTest, write_of_uncached_lid_does_not_populate_cache_for_any_strategy) {
+    for (auto strategy : {UpdateStrategy::INVALIDATE, UpdateStrategy::UPDATE, UpdateStrategy::UPDATE_IF_PRESENT}) {
+        SCOPED_TRACE(testing::Message() << "strategy=" << static_cast<int>(strategy));
+        verify_write_of_uncached_lid(strategy);
+    }
+}
+
+TEST(DocumentStoreTest, update_if_present_strategy_preserves_lru_position_of_rewritten_lid) {
+    // Lid 1 was warmed first and must be evicted first, even though it was rewritten last.
+    EXPECT_FALSE(is_cached_after_rewrite_and_first_eviction(UpdateStrategy::UPDATE_IF_PRESENT, 1));
+    EXPECT_TRUE(is_cached_after_rewrite_and_first_eviction(UpdateStrategy::UPDATE_IF_PRESENT, 2));
+}
+
+TEST(DocumentStoreTest, update_strategy_moves_rewritten_lid_to_lru_head) {
+    // Contrast with UPDATE_IF_PRESENT: the rewrite counts as an access, so lid 2 is evicted first.
+    EXPECT_TRUE(is_cached_after_rewrite_and_first_eviction(UpdateStrategy::UPDATE, 1));
+    EXPECT_FALSE(is_cached_after_rewrite_and_first_eviction(UpdateStrategy::UPDATE, 2));
+}
+
+TEST(DocumentStoreTest, remove_evicts_cached_lid_with_update_if_present_strategy) {
+    UpdateStrategyFixture f(UpdateStrategy::UPDATE_IF_PRESENT);
+    f.write(1, "id:ns:test::1");
+    (void)f.read_id(1);
+    EXPECT_EQ(1u, f.store.getCacheStats().elements);
+    f.store.remove(++f.serial_num, 1);
+    EXPECT_EQ(0u, f.store.getCacheStats().elements);
+    EXPECT_EQ("", f.read_id(1));
+}
+
 TEST(DocumentStoreTest, require_that_DocumentStore_Config_equality_operator_detects_inequality) {
     using C = DocumentStore::Config;
     EXPECT_TRUE(C() == C());
     EXPECT_TRUE(C(CompressionConfig::NONE, 100000) == C(CompressionConfig::NONE, 100000));
     EXPECT_FALSE(C(CompressionConfig::NONE, 100000) == C(CompressionConfig::NONE, 100001));
     EXPECT_FALSE(C(CompressionConfig::NONE, 100000) == C(CompressionConfig::LZ4, 100000));
+    EXPECT_FALSE(C().updateStrategy(C::UPDATE_IF_PRESENT) == C());
+    EXPECT_FALSE(C().updateStrategy(C::UPDATE_IF_PRESENT) == C().updateStrategy(C::UPDATE));
 }
 
 TEST(DocumentStoreTest, require_that_LogDocumentStore_Config_equality_operator_detects_inequality) {

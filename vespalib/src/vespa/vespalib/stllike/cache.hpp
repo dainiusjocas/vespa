@@ -52,6 +52,19 @@ template <typename P> bool cache<P>::SizeConstrainedLru::try_replace_and_update_
     return false;
 }
 
+template <typename P>
+bool cache<P>::SizeConstrainedLru::try_replace_no_ref_and_update_size(const KeyT& key, ValueT& value) {
+    auto iter = Lru::find_no_ref(key); // Does not alter LRU order
+    if (iter != Lru::end()) {
+        const auto new_kv_size = _owner.calcSize(key, value);
+        sub_size_bytes(_owner.calcSize(key, *iter));
+        add_size_bytes(new_kv_size);
+        *iter = std::move(value);
+        return true;
+    }
+    return false;
+}
+
 template <typename P> bool cache<P>::SizeConstrainedLru::try_erase_and_update_size(const KeyT& key) {
     auto iter = Lru::find_no_ref(key);
     if (iter != Lru::end()) {
@@ -354,6 +367,22 @@ template <typename P> void cache<P>::write(const K& key, V value) {
         }
         increment_stat(_write, guard); // TODO only increment when not updating?
     }
+}
+
+template <typename P> bool cache<P>::replaceIfPresent(const K& key, V value) {
+    // Hold the striped store lock to serialize against a concurrent read() that has missed the
+    // cache and is about to insert a value it fetched from the backing store.
+    std::lock_guard storeGuard(getLock(key));
+    std::lock_guard guard(_hashLock);
+    // Like write(), this does not touch the frequency sketch. Unlike write(), it also does not
+    // touch the LRU order nor move entries between segments.
+    if (_probationary_segment.try_replace_no_ref_and_update_size(key, value) ||
+        (multi_segment() && _protected_segment.try_replace_no_ref_and_update_size(key, value)))
+    {
+        increment_stat(_update, guard);
+        return true;
+    }
+    return false;
 }
 
 template <typename P> void cache<P>::erase(const K& key) {

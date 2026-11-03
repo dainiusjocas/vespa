@@ -7,6 +7,7 @@
 #include <vespa/vespalib/util/compressionconfig.h>
 
 namespace search::docstore {
+class Value;
 class VisitCache;
 class BackingStore;
 class Cache;
@@ -23,7 +24,16 @@ class DocumentStore : public IDocumentStore {
 public:
     class Config {
     public:
-        enum UpdateStrategy { INVALIDATE, UPDATE };
+        /**
+         * How the cache reacts when a lid is (re)written:
+         *  - INVALIDATE:        The cached entry, if any, is erased.
+         *  - UPDATE:            A cached entry, if any, is replaced and moved to the LRU head.
+         *  - UPDATE_IF_PRESENT: A cached entry, if any, is replaced in place, keeping its LRU
+         *                       position. Feed activity must not be mistaken for query activity,
+         *                       so e.g. a reindexing pass does not reorder the query-driven LRU.
+         * For a lid that is not cached, all strategies leave the cache untouched.
+         */
+        enum UpdateStrategy { INVALIDATE, UPDATE, UPDATE_IF_PRESENT };
         using CompressionConfig = vespalib::compression::CompressionConfig;
         Config() noexcept
             : _compression(CompressionConfig::LZ4, 9, 70), _maxCacheBytes(1000000000), _updateStrategy(INVALIDATE) {}
@@ -106,6 +116,7 @@ public:
 private:
     bool useCache() const;
     Config::UpdateStrategy updateStrategy() const;
+    docstore::Value makeCacheValue(uint64_t syncToken, const vespalib::nbostream& stream) const;
     void writeThroughCache(uint64_t syncToken, DocumentIdT lid, const vespalib::nbostream& stream);
 
     template <class> class WrapVisitor;

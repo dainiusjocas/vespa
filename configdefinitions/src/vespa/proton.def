@@ -225,7 +225,11 @@ summary.cache.compression.type enum {NONE, LZ4, ZSTD} default=LZ4
 summary.cache.compression.level int default=6
 
 ## Control if cache entry is updated or ivalidated when changed.
-summary.cache.update_strategy enum {INVALIDATE, UPDATE} default=INVALIDATE
+## INVALIDATE: the cached entry is removed.
+## UPDATE: a cached entry is replaced and moved to the head of the LRU list.
+## UPDATE_IF_PRESENT: a cached entry is replaced, keeping its LRU position.
+## With all strategies, a document that is not cached is not inserted into the cache.
+summary.cache.update_strategy enum {INVALIDATE, UPDATE, UPDATE_IF_PRESENT} default=INVALIDATE
 
 ## Control compression type of the summary while in memory during compaction
 ## NB So far only stragey=LOG honours it.
