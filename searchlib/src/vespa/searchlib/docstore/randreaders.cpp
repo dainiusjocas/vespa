@@ -51,6 +51,25 @@ FileRandRead::FSP DirectIORandRead::read(size_t offset, vespalib::DataBuffer& bu
     return FSP();
 }
 
+bool DirectIORandRead::get_direct_read(size_t offset, size_t sz, DirectRead& direct_read) const {
+    size_t padBefore(0);
+    size_t padAfter(0);
+    if (!_file->DirectIOPadding(offset, sz, padBefore, padAfter)) {
+        return false;
+    }
+    size_t length = padBefore + sz + padAfter;
+    if ((((offset - padBefore) % _granularity) != 0) || ((length % _granularity) != 0)) {
+        return false; // Unaligned end of file
+    }
+    direct_read.fd = static_cast<const FastOS_File&>(*_file).get_file_descriptor();
+    direct_read.offset = offset - padBefore;
+    direct_read.length = length;
+    direct_read.alignment = _alignment;
+    direct_read.pad_before = padBefore;
+    direct_read.size = sz;
+    return true;
+}
+
 int64_t DirectIORandRead::getSize() const {
     return _file->getSize();
 }

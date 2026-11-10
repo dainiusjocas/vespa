@@ -24,13 +24,24 @@ public:
     class Config {
     public:
         enum UpdateStrategy { INVALIDATE, UPDATE };
+        /*
+         * How the documents needed by a batch (see start_prefetch()) are read:
+         * SYNC: one chunk at a time. IO_URING: several chunks at the same time, using io_uring if available.
+         */
+        enum class PrefetchMode { OFF, SYNC, IO_URING };
         using CompressionConfig = vespalib::compression::CompressionConfig;
         Config() noexcept
-            : _compression(CompressionConfig::LZ4, 9, 70), _maxCacheBytes(1000000000), _updateStrategy(INVALIDATE) {}
+            : _compression(CompressionConfig::LZ4, 9, 70),
+              _maxCacheBytes(1000000000),
+              _updateStrategy(INVALIDATE),
+              _prefetchMode(PrefetchMode::OFF),
+              _prefetchDepth(1) {}
         Config(CompressionConfig compression, size_t maxCacheBytes) noexcept
             : _compression((maxCacheBytes != 0) ? compression : CompressionConfig::NONE),
               _maxCacheBytes(maxCacheBytes),
-              _updateStrategy(INVALIDATE) {}
+              _updateStrategy(INVALIDATE),
+              _prefetchMode(PrefetchMode::OFF),
+              _prefetchDepth(1) {}
         CompressionConfig getCompression() const { return _compression; }
         size_t getMaxCacheBytes() const { return _maxCacheBytes; }
         Config& disableCache() {
@@ -42,12 +53,22 @@ public:
             return *this;
         }
         UpdateStrategy updateStrategy() const { return _updateStrategy; }
+        Config& prefetch(PrefetchMode mode, uint32_t depth = 1) {
+            _prefetchMode = mode;
+            _prefetchDepth = depth;
+            return *this;
+        }
+        PrefetchMode prefetchMode() const { return _prefetchMode; }
+        // Max number of chunks read at the same time
+        uint32_t prefetchDepth() const { return _prefetchDepth; }
         bool operator==(const Config&) const;
 
     private:
         CompressionConfig _compression;
         size_t            _maxCacheBytes;
         UpdateStrategy    _updateStrategy;
+        PrefetchMode      _prefetchMode;
+        uint32_t          _prefetchDepth;
     };
 
     /**
@@ -63,6 +84,8 @@ public:
     DocumentUP read(DocumentIdT lid, const document::DocumentTypeRepo& repo) const override;
     void visit(const LidVector& lids, const document::DocumentTypeRepo& repo,
                IDocumentVisitor& visitor) const override;
+    std::unique_ptr<IDocumentStorePrefetch> start_prefetch(const LidVector& lids) const override;
+    DocumentStorePrefetchStats getPrefetchStats() const override;
     void write(uint64_t synkToken, DocumentIdT lid, const document::Document& doc) override;
     void write(uint64_t synkToken, DocumentIdT lid, const vespalib::nbostream& os) override;
     void remove(uint64_t syncToken, DocumentIdT lid) override;
@@ -111,11 +134,17 @@ private:
 
     template <class> class WrapVisitor;
     class WrapVisitorProgress;
+    class Prefetch;
     IDataStore&                             _backingStore;
     std::unique_ptr<docstore::BackingStore> _store;
     std::unique_ptr<docstore::Cache>        _cache;
     std::unique_ptr<docstore::VisitCache>   _visitCache;
     std::atomic<Config::UpdateStrategy>     _updateStrategy;
+    std::atomic<uint32_t>                   _prefetch_max_in_flight; // 0 when prefetch is disabled
+    mutable std::atomic<uint64_t>           _prefetch_requests;
+    mutable std::atomic<uint64_t>           _prefetch_documents;
+    mutable std::atomic<uint64_t>           _prefetch_reads;
+    mutable std::atomic<uint64_t>           _prefetch_direct_reads;
     mutable std::atomic<uint64_t>           _uncached_lookups;
 };
 

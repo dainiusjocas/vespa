@@ -98,6 +98,7 @@ vespa_define_module(
     src/tests/host_name
     src/tests/hwaccelerated
     src/tests/invokeservice
+    src/tests/io/async_file_reader
     src/tests/io/fileutil
     src/tests/io/mapped_file_input
     src/tests/latch

@@ -217,6 +217,20 @@ public enum SearchNodeMetrics implements VespaMetrics {
     CONTENT_PROTON_DOCUMENTDB_REMOVED_DOCUMENT_STORE_CACHE_LOOKUPS("content.proton.documentdb.removed.document_store.cache.lookups", Unit.OPERATION, "Number of lookups in the cache (hits + misses)"),
     CONTENT_PROTON_DOCUMENTDB_REMOVED_DOCUMENT_STORE_CACHE_MEMORY_USAGE("content.proton.documentdb.removed.document_store.cache.memory_usage", Unit.BYTE, "Memory usage of the cache (in bytes)"),
 
+    // document store prefetch
+    CONTENT_PROTON_DOCUMENTDB_READY_DOCUMENT_STORE_PREFETCH_REQUESTS("content.proton.documentdb.ready.document_store.prefetch.requests", Unit.REQUEST, "Number of document summary requests that fetched documents as a batch"),
+    CONTENT_PROTON_DOCUMENTDB_READY_DOCUMENT_STORE_PREFETCH_DOCUMENTS("content.proton.documentdb.ready.document_store.prefetch.documents", Unit.DOCUMENT, "Number of documents fetched as part of a batch"),
+    CONTENT_PROTON_DOCUMENTDB_READY_DOCUMENT_STORE_PREFETCH_READS("content.proton.documentdb.ready.document_store.prefetch.reads", Unit.OPERATION, "Number of chunks read to fetch documents as batches"),
+    CONTENT_PROTON_DOCUMENTDB_READY_DOCUMENT_STORE_PREFETCH_DIRECT_READS("content.proton.documentdb.ready.document_store.prefetch.direct_reads", Unit.OPERATION, "Number of chunks read directly from file with several reads in flight to fetch documents as batches"),
+    CONTENT_PROTON_DOCUMENTDB_NOTREADY_DOCUMENT_STORE_PREFETCH_REQUESTS("content.proton.documentdb.notready.document_store.prefetch.requests", Unit.REQUEST, "Number of document summary requests that fetched documents as a batch"),
+    CONTENT_PROTON_DOCUMENTDB_NOTREADY_DOCUMENT_STORE_PREFETCH_DOCUMENTS("content.proton.documentdb.notready.document_store.prefetch.documents", Unit.DOCUMENT, "Number of documents fetched as part of a batch"),
+    CONTENT_PROTON_DOCUMENTDB_NOTREADY_DOCUMENT_STORE_PREFETCH_READS("content.proton.documentdb.notready.document_store.prefetch.reads", Unit.OPERATION, "Number of chunks read to fetch documents as batches"),
+    CONTENT_PROTON_DOCUMENTDB_NOTREADY_DOCUMENT_STORE_PREFETCH_DIRECT_READS("content.proton.documentdb.notready.document_store.prefetch.direct_reads", Unit.OPERATION, "Number of chunks read directly from file with several reads in flight to fetch documents as batches"),
+    CONTENT_PROTON_DOCUMENTDB_REMOVED_DOCUMENT_STORE_PREFETCH_REQUESTS("content.proton.documentdb.removed.document_store.prefetch.requests", Unit.REQUEST, "Number of document summary requests that fetched documents as a batch"),
+    CONTENT_PROTON_DOCUMENTDB_REMOVED_DOCUMENT_STORE_PREFETCH_DOCUMENTS("content.proton.documentdb.removed.document_store.prefetch.documents", Unit.DOCUMENT, "Number of documents fetched as part of a batch"),
+    CONTENT_PROTON_DOCUMENTDB_REMOVED_DOCUMENT_STORE_PREFETCH_READS("content.proton.documentdb.removed.document_store.prefetch.reads", Unit.OPERATION, "Number of chunks read to fetch documents as batches"),
+    CONTENT_PROTON_DOCUMENTDB_REMOVED_DOCUMENT_STORE_PREFETCH_DIRECT_READS("content.proton.documentdb.removed.document_store.prefetch.direct_reads", Unit.OPERATION, "Number of chunks read directly from file with several reads in flight to fetch documents as batches"),
+
     // attribute
     CONTENT_PROTON_DOCUMENTDB_READY_ATTRIBUTE_MEMORY_USAGE_ALLOCATED_BYTES("content.proton.documentdb.ready.attribute.memory_usage.allocated_bytes", Unit.BYTE, "The number of allocated bytes"),
     CONTENT_PROTON_DOCUMENTDB_READY_ATTRIBUTE_MEMORY_USAGE_USED_BYTES("content.proton.documentdb.ready.attribute.memory_usage.used_bytes", Unit.BYTE, "The number of used bytes (<= allocated_bytes)"),

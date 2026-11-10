@@ -8,12 +8,16 @@
 #include "index_metrics.h"
 #include "memory_usage_metrics.h"
 
+#include <vespa/metrics/countmetric.h>
 #include <vespa/metrics/metricset.h>
 #include <vespa/metrics/valuemetric.h>
 #include <vespa/searchcore/proton/matching/matching_stats.h>
 
 namespace metrics {
 class MetricLockGuard;
+}
+namespace search {
+struct DocumentStorePrefetchStats;
 }
 
 namespace proton {
@@ -52,11 +56,32 @@ struct DocumentDBTaggedMetrics : metrics::MetricSet {
         };
 
         struct DocumentStoreMetrics : metrics::MetricSet {
+            /**
+             * Metrics for documents fetched as batches by docsum requests (summary prefetch).
+             */
+            struct PrefetchMetrics : metrics::MetricSet {
+                metrics::LongCountMetric requests;
+                metrics::LongCountMetric documents;
+                metrics::LongCountMetric reads;
+                metrics::LongCountMetric directReads;
+
+                PrefetchMetrics(metrics::MetricSet* parent);
+                ~PrefetchMetrics() override;
+                void update(const search::DocumentStorePrefetchStats& stats);
+
+            private:
+                uint64_t _last_requests;
+                uint64_t _last_documents;
+                uint64_t _last_reads;
+                uint64_t _last_direct_reads;
+            };
+
             metrics::LongValueMetric   diskUsage;
             metrics::LongValueMetric   diskBloat;
             metrics::DoubleValueMetric maxBucketSpread;
             MemoryUsageMetrics         memoryUsage;
             CacheMetrics               cache;
+            PrefetchMetrics            prefetch;
 
             DocumentStoreMetrics(metrics::MetricSet* parent);
             ~DocumentStoreMetrics() override;

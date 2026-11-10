@@ -161,7 +161,24 @@ public class Tuning extends AnyConfigProducer implements ProtonConfig.Producer {
 
         public static class Summary implements ProtonConfig.Producer {
             public static class Io {
+                /** How the documents needed by a document summary request are read */
+                public enum Prefetch {
+                    OFF, SYNC, IO_URING;
+
+                    public static Prefetch fromString(String name) {
+                        return switch (name) {
+                            case "off" -> OFF;
+                            case "sync" -> SYNC;
+                            case "io_uring" -> IO_URING;
+                            default -> throw new IllegalArgumentException("Unknown summary io prefetch '" + name +
+                                                                          "', expected 'off', 'sync' or 'io_uring'");
+                        };
+                    }
+                }
+
                 public IoType read = null;
+                public Prefetch prefetch = null;
+                public Integer prefetchDepth = null;
 
                 public void getConfig(ProtonConfig.Summary.Builder builder) {
                     if (read != null) {
@@ -171,6 +188,12 @@ public class Tuning extends AnyConfigProducer implements ProtonConfig.Producer {
                         } else {
                             builder.read.io(ProtonConfig.Summary.Read.Io.Enum.valueOf(read.name));
                         }
+                    }
+                    if (prefetch != null) {
+                        builder.read.prefetch(ProtonConfig.Summary.Read.Prefetch.Enum.valueOf(prefetch.name()));
+                    }
+                    if (prefetchDepth != null) {
+                        builder.read.prefetchdepth(prefetchDepth);
                     }
                 }
             }

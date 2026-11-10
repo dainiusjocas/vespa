@@ -153,16 +153,30 @@ DocumentStore::Config::UpdateStrategy derive(ProtonConfig::Summary::Cache::Updat
     return DocumentStore::Config::UpdateStrategy::INVALIDATE;
 }
 
-DocumentStore::Config getStoreConfig(const ProtonConfig::Summary::Cache& cache, const vespalib::HwInfo& hwInfo) {
+DocumentStore::Config::PrefetchMode derive(ProtonConfig::Summary::Read::Prefetch prefetch) {
+    switch (prefetch) {
+    case ProtonConfig::Summary::Read::Prefetch::OFF:
+        return DocumentStore::Config::PrefetchMode::OFF;
+    case ProtonConfig::Summary::Read::Prefetch::SYNC:
+        return DocumentStore::Config::PrefetchMode::SYNC;
+    case ProtonConfig::Summary::Read::Prefetch::IO_URING:
+        return DocumentStore::Config::PrefetchMode::IO_URING;
+    }
+    return DocumentStore::Config::PrefetchMode::OFF;
+}
+
+DocumentStore::Config getStoreConfig(const ProtonConfig::Summary& summary, const vespalib::HwInfo& hwInfo) {
+    const ProtonConfig::Summary::Cache& cache(summary.cache);
     size_t maxBytes = (cache.maxbytes < 0)
                           ? (hwInfo.memory().sizeBytes() * std::min(INT64_C(50), -cache.maxbytes)) / 100l
                           : cache.maxbytes;
     return DocumentStore::Config(deriveCompression(cache.compression), maxBytes)
-        .updateStrategy(derive(cache.updateStrategy));
+        .updateStrategy(derive(cache.updateStrategy))
+        .prefetch(derive(summary.read.prefetch), std::max(1, summary.read.prefetchdepth));
 }
 
 LogDocumentStore::Config deriveConfig(const ProtonConfig::Summary& summary, const vespalib::HwInfo& hwInfo) {
-    DocumentStore::Config                    config(getStoreConfig(summary.cache, hwInfo));
+    DocumentStore::Config                    config(getStoreConfig(summary, hwInfo));
     const ProtonConfig::Summary::Log&        log(summary.log);
     const ProtonConfig::Summary::Log::Chunk& chunk(log.chunk);
     WriteableFileChunk::Config               fileConfig(deriveCompression(chunk.compression), chunk.maxbytes);

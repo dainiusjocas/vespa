@@ -15,3 +15,9 @@ vespa_add_executable(searchlib_visitcache_test_app TEST
     GTest::gtest
 )
 vespa_add_test(NAME searchlib_visitcache_test_app COMMAND searchlib_visitcache_test_app)
+vespa_add_executable(searchlib_document_store_prefetch_benchmark_app
+    SOURCES
+    document_store_prefetch_benchmark.cpp
+    DEPENDS
+    vespa_searchlib
+)

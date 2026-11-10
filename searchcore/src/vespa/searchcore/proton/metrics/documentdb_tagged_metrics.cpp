@@ -2,6 +2,7 @@
 
 #include "documentdb_tagged_metrics.h"
 
+#include <vespa/searchlib/docstore/idocumentstore.h>
 #include <vespa/vespalib/util/stringfmt.h>
 
 #include <vespa/log/log.h>
@@ -66,10 +67,39 @@ DocumentDBTaggedMetrics::SubDBMetrics::DocumentStoreMetrics::DocumentStoreMetric
           "max_bucket_spread", {},
           "Max bucket spread in underlying files (sum(unique buckets in each chunk)/unique buckets in file)", this),
       memoryUsage(this),
-      cache(this, "cache", "Document store cache metrics", "Document store") {
+      cache(this, "cache", "Document store cache metrics", "Document store"),
+      prefetch(this) {
 }
 
 DocumentDBTaggedMetrics::SubDBMetrics::DocumentStoreMetrics::~DocumentStoreMetrics() = default;
+
+DocumentDBTaggedMetrics::SubDBMetrics::DocumentStoreMetrics::PrefetchMetrics::PrefetchMetrics(MetricSet* parent)
+    : MetricSet("prefetch", {}, "Metrics for documents fetched as batches by document summary requests", parent),
+      requests("requests", {}, "Number of document summary requests that fetched documents as a batch", this),
+      documents("documents", {}, "Number of documents fetched as part of a batch", this),
+      reads("reads", {}, "Number of chunks read to fetch documents as batches", this),
+      directReads("direct_reads", {},
+                  "Number of chunks read directly from file with several reads in flight to fetch documents as batches",
+                  this),
+      _last_requests(0),
+      _last_documents(0),
+      _last_reads(0),
+      _last_direct_reads(0) {
+}
+
+DocumentDBTaggedMetrics::SubDBMetrics::DocumentStoreMetrics::PrefetchMetrics::~PrefetchMetrics() = default;
+
+void DocumentDBTaggedMetrics::SubDBMetrics::DocumentStoreMetrics::PrefetchMetrics::update(
+    const search::DocumentStorePrefetchStats& stats) {
+    auto update_count = [](metrics::LongCountMetric& metric, uint64_t current, uint64_t& last) {
+        metric.inc((current >= last) ? (current - last) : 0);
+        last = current;
+    };
+    update_count(requests, stats.requests, _last_requests);
+    update_count(documents, stats.documents, _last_documents);
+    update_count(reads, stats.reads, _last_reads);
+    update_count(directReads, stats.direct_reads, _last_direct_reads);
+}
 
 DocumentDBTaggedMetrics::AttributeMetrics::AttributeMetrics(MetricSet* parent)
     : MetricSet("attribute", {}, "Attribute vector metrics for this document db", parent),

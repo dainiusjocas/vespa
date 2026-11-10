@@ -434,6 +434,28 @@ TEST(ProtonConfigFetcherTest, require_that_docstore_config_computes_cachesize_au
     EXPECT_EQ(500000ul, config->getStoreConfig().getMaxCacheBytes());
 }
 
+TEST(ProtonConfigFetcherTest, require_that_summary_prefetch_config_is_propagated) {
+    ConfigTestFixture       f1("test");
+    DocumentDBConfigManager f2(f1.configId + "/test", "test");
+    f1.addDocType("test");
+    using PrefetchMode = search::DocumentStore::Config::PrefetchMode;
+    auto config = getDocumentDBConfig(f1, f2);
+    EXPECT_EQ(PrefetchMode::OFF, config->getStoreConfig().prefetchMode());
+
+    f1.bootstrap_config_builder.proton.summary.read.prefetch = ProtonConfig::Summary::Read::Prefetch::SYNC;
+    config = getDocumentDBConfig(f1, f2);
+    EXPECT_EQ(PrefetchMode::SYNC, config->getStoreConfig().prefetchMode());
+
+    f1.bootstrap_config_builder.proton.summary.read.prefetch = ProtonConfig::Summary::Read::Prefetch::IO_URING;
+    config = getDocumentDBConfig(f1, f2);
+    EXPECT_EQ(PrefetchMode::IO_URING, config->getStoreConfig().prefetchMode());
+    EXPECT_EQ(32u, config->getStoreConfig().prefetchDepth());
+
+    f1.bootstrap_config_builder.proton.summary.read.prefetchdepth = 8;
+    config = getDocumentDBConfig(f1, f2);
+    EXPECT_EQ(8u, config->getStoreConfig().prefetchDepth());
+}
+
 namespace {
 
 GrowStrategy growStrategy(uint32_t initial) {

@@ -95,6 +95,24 @@ TEST_F(CacheTest, basic) {
     EXPECT_TRUE(cache.size() == 1);
 }
 
+TEST_F(CacheTest, insert_if_absent_does_not_write_through_or_replace) {
+    cache<CacheParam<P, B>> cache(m, -1);
+    EXPECT_TRUE(cache.insert_if_absent(1, "inserted"));
+    EXPECT_TRUE(cache.hasKey(1));
+    EXPECT_TRUE(m.empty()); // Not written to backing store
+    EXPECT_EQ(cache.read(1), "inserted");
+    EXPECT_EQ(cache.getInsert(), 1);
+    EXPECT_EQ(cache.getWrite(), 0);
+
+    EXPECT_FALSE(cache.insert_if_absent(1, "ignored"));
+    EXPECT_EQ(cache.read(1), "inserted");
+    EXPECT_EQ(cache.getInsert(), 1);
+
+    cache.invalidate(1);
+    EXPECT_TRUE(cache.insert_if_absent(1, "inserted again"));
+    EXPECT_EQ(cache.read(1), "inserted again");
+}
+
 TEST_F(CacheTest, cache_size) {
     cache<CacheParam<P, B>> cache(m, -1);
     cache.write(1, "10 bytes string");
@@ -625,6 +643,24 @@ TEST_F(LfuCacheTest, lfu_gates_probationary_segment_displacing) {
     EXPECT_EQ(cache.lfu_dropped(), 2);
     ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {4, 3, 2}, {}));
     EXPECT_EQ(cache.lfu_not_promoted(), 0); // Only applies to SLRU
+}
+
+TEST_F(LfuCacheTest, lfu_gates_insert_if_absent) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, -1, 0);
+    cache.maxElements(3, 0);
+    cache.set_frequency_sketch_size(3);
+    ASSERT_EQ(cache.read(1), "a");
+    ASSERT_EQ(cache.read(1), "a");
+    ASSERT_EQ(cache.read(2), "b");
+    ASSERT_EQ(cache.read(3), "c");
+    // Same admission policy as for a read() cache miss; 4 must become more popular than 1 to displace it.
+    EXPECT_FALSE(cache.insert_if_absent(4, "d"));
+    EXPECT_FALSE(cache.insert_if_absent(4, "d"));
+    EXPECT_EQ(cache.lfu_dropped(), 2);
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2, 1}, {}));
+    EXPECT_TRUE(cache.insert_if_absent(4, "d"));
+    EXPECT_EQ(cache.lfu_dropped(), 2);
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {4, 3, 2}, {}));
 }
 
 TEST_F(LfuCacheTest, lfu_gates_protected_segment_displacing) {

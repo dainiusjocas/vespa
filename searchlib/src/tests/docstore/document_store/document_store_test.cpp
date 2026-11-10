@@ -4,16 +4,21 @@
 #include <vespa/document/fieldvalue/document.h>
 #include <vespa/document/repo/documenttyperepo.h>
 #include <vespa/document/repo/newconfigbuilder.h>
+#include <vespa/searchlib/docstore/ibucketizer.h>
 #include <vespa/searchlib/docstore/logdocumentstore.h>
 #include <vespa/searchlib/docstore/value.h>
 #include <vespa/vespalib/gtest/gtest.h>
 #include <vespa/vespalib/objects/nbostream.h>
 #include <vespa/vespalib/stllike/cache_stats.h>
 
+#include <functional>
 #include <map>
 
 using namespace search;
 using CompressionConfig = vespalib::compression::CompressionConfig;
+using PrefetchMode = DocumentStore::Config::PrefetchMode;
+
+constexpr vespalib::steady_time no_deadline = vespalib::steady_time::max();
 
 document::DocumentTypeRepo repo;
 
@@ -167,9 +172,158 @@ TEST(DocumentStoreTest, require_that_move_works_when_cache_is_disabled) {
     EXPECT_EQ(2u, backing_store._reads);
 }
 
+namespace {
+
+/*
+ * Memory data store where lids are assigned to storage units, tracking batch reads.
+ */
+struct ChunkedMemoryDataStore : MemoryDataStore {
+    std::map<uint32_t, uint64_t>   _storage_units;
+    mutable std::vector<LidVector> _batch_reads;
+    std::function<void()>          _after_batch_read;
+    ~ChunkedMemoryDataStore() override;
+    void read(const LidVector& lids, IBufferVisitor& visitor) const override {
+        _batch_reads.push_back(lids);
+        if (_after_batch_read) {
+            _after_batch_read();
+        }
+        for (uint32_t lid : lids) {
+            auto itr = _docs.find(lid);
+            if (itr != _docs.end()) {
+                visitor.visit(lid, vespalib::ConstBufferRef(itr->second.data(), itr->second.size()));
+            }
+        }
+    }
+    uint64_t get_storage_unit(uint32_t lid) const override {
+        auto itr = _storage_units.find(lid);
+        return (itr != _storage_units.end()) ? itr->second : no_storage_unit;
+    }
+};
+
+ChunkedMemoryDataStore::~ChunkedMemoryDataStore() = default;
+
+struct PrefetchFixture {
+    using LidVector = IDocumentStore::LidVector;
+    std::unique_ptr<document::DocumentTypeRepo> test_repo;
+    ChunkedMemoryDataStore                      backing_store;
+    DocumentStore                               store;
+    explicit PrefetchFixture(size_t max_cache_bytes)
+        : test_repo(make_test_repo()),
+          backing_store(),
+          store(DocumentStore::Config(CompressionConfig::NONE, max_cache_bytes).prefetch(PrefetchMode::SYNC), backing_store) {}
+    ~PrefetchFixture();
+    void write(uint32_t lid, uint64_t storage_unit) {
+        document::Document doc(*test_repo, *test_repo->getDocumentType("test"),
+                               document::DocumentId("id:ns:test::" + std::to_string(lid)));
+        store.write(lid, lid, doc);
+        backing_store._storage_units[lid] = storage_unit;
+    }
+    std::string taken_id(IDocumentStorePrefetch& prefetch, uint32_t lid) {
+        auto doc = prefetch.take(lid, *test_repo);
+        return doc ? doc->getId().toString() : "";
+    }
+};
+
+PrefetchFixture::~PrefetchFixture() = default;
+
+} // namespace
+
+TEST(DocumentStoreTest, require_that_prefetch_is_disabled_by_default) {
+    auto                   test_repo = make_test_repo();
+    ChunkedMemoryDataStore backing_store;
+    DocumentStore          store(DocumentStore::Config(CompressionConfig::NONE, 100000), backing_store);
+    store.write(1, 1, *make_test_doc(*test_repo));
+    backing_store._storage_units[1] = 10;
+    EXPECT_FALSE(store.start_prefetch({1}));
+    store.reconfigure(DocumentStore::Config(CompressionConfig::NONE, 100000).prefetch(PrefetchMode::SYNC));
+    EXPECT_TRUE(store.start_prefetch({1}));
+}
+
+TEST(DocumentStoreTest, require_that_prefetch_reads_uncached_documents_one_storage_unit_at_a_time) {
+    using LidVector = IDocumentStore::LidVector;
+    PrefetchFixture f(100000);
+    f.write(1, 10);
+    f.write(2, 20);
+    f.write(3, 10);
+    f.write(4, 20);
+    f.write(5, 30);
+    EXPECT_TRUE(f.store.read(5, *f.test_repo)); // Now cached
+    EXPECT_EQ(1u, f.backing_store._reads);
+
+    // lid 5 is cached, lid 6 does not exist. Storage unit 20 is needed first.
+    auto prefetch = f.store.start_prefetch({4, 6, 1, 5, 3, 2, 4});
+    ASSERT_TRUE(prefetch);
+    EXPECT_EQ(LidVector({2, 4, 1, 3}), prefetch->lids());
+    EXPECT_TRUE(f.backing_store._batch_reads.empty());
+    EXPECT_EQ("", f.taken_id(*prefetch, 4));
+
+    EXPECT_EQ(LidVector({2, 4}), prefetch->fetch_more(no_deadline));
+    EXPECT_EQ(LidVector({2, 4}), f.backing_store._batch_reads.back());
+    EXPECT_EQ("id:ns:test::4", f.taken_id(*prefetch, 4));
+    EXPECT_EQ("", f.taken_id(*prefetch, 4)); // Already taken
+    EXPECT_EQ("", f.taken_id(*prefetch, 1)); // Not yet fetched
+    EXPECT_EQ("id:ns:test::2", f.taken_id(*prefetch, 2));
+
+    EXPECT_EQ(LidVector({1, 3}), prefetch->fetch_more(no_deadline));
+    EXPECT_EQ("id:ns:test::1", f.taken_id(*prefetch, 1));
+    EXPECT_EQ("id:ns:test::3", f.taken_id(*prefetch, 3));
+    EXPECT_TRUE(prefetch->fetch_more(no_deadline).empty());
+    EXPECT_EQ(2u, f.backing_store._batch_reads.size());
+
+    auto stats = f.store.getPrefetchStats();
+    EXPECT_EQ(1u, stats.requests);
+    EXPECT_EQ(4u, stats.documents);
+    EXPECT_EQ(2u, stats.reads);
+    EXPECT_EQ(0u, stats.direct_reads);
+
+    // The fetched documents are cached, and counted as cache misses
+    EXPECT_EQ(5u, f.store.getCacheStats().elements);
+    EXPECT_EQ(5u, f.store.getCacheStats().misses);
+    for (uint32_t lid : {1, 2, 3, 4, 5}) {
+        auto doc = f.store.read(lid, *f.test_repo);
+        ASSERT_TRUE(doc);
+        EXPECT_EQ("id:ns:test::" + std::to_string(lid), doc->getId().toString());
+    }
+    EXPECT_EQ(1u, f.backing_store._reads);
+    EXPECT_FALSE(f.store.start_prefetch({1, 2, 3, 4, 5, 6})); // Nothing to fetch
+}
+
+TEST(DocumentStoreTest, require_that_prefetch_works_when_cache_is_disabled) {
+    using LidVector = IDocumentStore::LidVector;
+    PrefetchFixture f(0);
+    f.write(1, 10);
+    f.write(2, 10);
+    auto prefetch = f.store.start_prefetch({2, 1});
+    ASSERT_TRUE(prefetch);
+    EXPECT_EQ(LidVector({1, 2}), prefetch->fetch_more(no_deadline));
+    EXPECT_EQ("id:ns:test::1", f.taken_id(*prefetch, 1));
+    EXPECT_EQ("id:ns:test::2", f.taken_id(*prefetch, 2));
+    EXPECT_EQ(0u, f.store.getCacheStats().elements);
+    EXPECT_TRUE(f.store.start_prefetch({2, 1}));
+}
+
+TEST(DocumentStoreTest, require_that_prefetch_does_not_cache_document_written_while_being_fetched) {
+    PrefetchFixture f(100000);
+    f.write(1, 10);
+    f.write(2, 10);
+    auto prefetch = f.store.start_prefetch({1, 2});
+    ASSERT_TRUE(prefetch);
+    // lid 1 is written again, ending up in another storage unit, after it has been located
+    f.backing_store._after_batch_read = [&f]() { f.write(1, 20); };
+    EXPECT_EQ(2u, prefetch->fetch_more(no_deadline).size());
+    EXPECT_EQ(1u, f.store.getCacheStats().elements);
+    EXPECT_TRUE(f.store.read(2, *f.test_repo));
+    EXPECT_EQ(0u, f.backing_store._reads);
+    EXPECT_TRUE(f.store.read(1, *f.test_repo));
+    EXPECT_EQ(1u, f.backing_store._reads);
+}
+
 TEST(DocumentStoreTest, require_that_DocumentStore_Config_equality_operator_detects_inequality) {
     using C = DocumentStore::Config;
     EXPECT_TRUE(C() == C());
+    EXPECT_FALSE(C().prefetch(PrefetchMode::SYNC) == C());
+    EXPECT_FALSE(C().prefetch(PrefetchMode::IO_URING, 8) == C().prefetch(PrefetchMode::IO_URING, 16));
+    EXPECT_TRUE(C().prefetch(PrefetchMode::IO_URING, 8) == C().prefetch(PrefetchMode::IO_URING, 8));
     EXPECT_TRUE(C(CompressionConfig::NONE, 100000) == C(CompressionConfig::NONE, 100000));
     EXPECT_FALSE(C(CompressionConfig::NONE, 100000) == C(CompressionConfig::NONE, 100001));
     EXPECT_FALSE(C(CompressionConfig::NONE, 100000) == C(CompressionConfig::LZ4, 100000));

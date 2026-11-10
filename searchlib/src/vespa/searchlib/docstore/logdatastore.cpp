@@ -8,6 +8,7 @@
 #include <vespa/check_require.h>
 #include <vespa/searchlib/util/disk_space_calculator.h>
 #include <vespa/vespalib/data/fileheader.h>
+#include <vespa/vespalib/io/async_file_reader.h>
 #include <vespa/vespalib/stllike/asciistream.h>
 #include <vespa/vespalib/util/benchmark_timer.h>
 #include <vespa/vespalib/util/cpu_usage.h>
@@ -215,6 +216,169 @@ ssize_t LogDataStore::read(uint32_t lid, vespalib::DataBuffer& buffer) const {
         }
     }
     return sz;
+}
+
+uint64_t LogDataStore::get_storage_unit(uint32_t lid) const {
+    if (lid < getDocIdLimit()) {
+        auto    guard(_genHandler.takeGuard());
+        LidInfo li = vespalib::atomic::load_ref_acquire(_lidInfo.acquire_elem_ref(lid));
+        if (!li.empty() && li.valid()) {
+            return (uint64_t(li.getFileId()) << 32) | li.getChunkId();
+        }
+    }
+    return no_storage_unit;
+}
+
+namespace {
+
+/*
+ * Each thread keeps a file reader for reuse, as setting one up (an io_uring) is not free.
+ * It is borrowed while in use, such that reads in progress never share a reader.
+ */
+thread_local std::unique_ptr<vespalib::AsyncFileReader> idle_file_reader;
+
+std::unique_ptr<vespalib::AsyncFileReader> borrow_file_reader(uint32_t depth) {
+    auto reader = std::move(idle_file_reader);
+    if (!reader || (reader->depth() != depth)) {
+        reader = vespalib::AsyncFileReader::create(depth);
+    }
+    return reader;
+}
+
+void return_file_reader(std::unique_ptr<vespalib::AsyncFileReader> reader) {
+    reader->cancel_all();
+    idle_file_reader = std::move(reader);
+}
+
+} // namespace
+
+/*
+ * Reads the chunks needed by groups of lids directly from the data files, with several reads in flight.
+ * Groups that cannot be read that way are read using the regular batch read.
+ */
+class LogDataStore::AsyncRead : public IDataStoreRead {
+    struct ChunkRead {
+        size_t                   group;
+        uint32_t                 chunk_id;
+        FileRandRead::DirectRead direct_read;
+        vespalib::alloc::Alloc   buf;
+    };
+    const LogDataStore&                        _store;
+    vespalib::GenerationGuard                  _guard; // Keeps the files being read alive
+    std::vector<LidVector>                     _groups;
+    size_t                                     _next;
+    std::unique_ptr<vespalib::AsyncFileReader> _reader;
+    std::vector<ChunkRead>                     _reads; // indexed by tag
+    std::vector<uint32_t>                      _free_tags;
+    std::vector<size_t>                        _blocking; // groups that must be read using the regular batch read
+    size_t                                     _direct_reads;
+
+    bool try_start(size_t group);
+    void start_reads();
+
+public:
+    AsyncRead(const LogDataStore& store, std::vector<LidVector> groups, uint32_t max_in_flight);
+    ~AsyncRead() override;
+    size_t read_next(IBufferVisitor& visitor, vespalib::steady_time deadline) override;
+    size_t direct_reads() const noexcept override { return _direct_reads; }
+};
+
+LogDataStore::AsyncRead::AsyncRead(const LogDataStore& store, std::vector<LidVector> groups, uint32_t max_in_flight)
+    : _store(store),
+      _guard(store._genHandler.takeGuard()),
+      _groups(std::move(groups)),
+      _next(0),
+      _reader(borrow_file_reader(max_in_flight)),
+      _reads(max_in_flight),
+      _free_tags(),
+      _blocking(),
+      _direct_reads(0) {
+    for (uint32_t tag = 0; tag < max_in_flight; ++tag) {
+        _free_tags.push_back(tag);
+    }
+    start_reads();
+}
+
+LogDataStore::AsyncRead::~AsyncRead() {
+    return_file_reader(std::move(_reader));
+}
+
+bool LogDataStore::AsyncRead::try_start(size_t group) {
+    // The lids were in the same chunk when grouped. Verify that they still are, as only that chunk is read.
+    LidInfo chunk;
+    for (uint32_t lid : _groups[group]) {
+        LidInfo li = _store.getLid(_guard, lid);
+        if (li.empty() || !li.valid() || (chunk.valid() && !(li == chunk))) {
+            return false;
+        }
+        chunk = li;
+    }
+    if (!chunk.valid()) {
+        return false;
+    }
+    uint32_t   tag = _free_tags.back();
+    ChunkRead& read = _reads[tag];
+    if (!_store._fileChunks[chunk.getFileId()]->get_direct_read(chunk.getChunkId(), read.direct_read)) {
+        return false;
+    }
+    _free_tags.pop_back();
+    read.group = group;
+    read.chunk_id = chunk.getChunkId();
+    read.buf = vespalib::alloc::Alloc::alloc_aligned(read.direct_read.length, read.direct_read.alignment);
+    _reader->submit(read.direct_read.fd, read.buf.get(), read.direct_read.length, read.direct_read.offset, tag);
+    return true;
+}
+
+void LogDataStore::AsyncRead::start_reads() {
+    for (; (_next < _groups.size()) && _reader->can_submit(); ++_next) {
+        if (!try_start(_next)) {
+            _blocking.push_back(_next);
+        }
+    }
+    _reader->flush();
+}
+
+size_t LogDataStore::AsyncRead::read_next(IBufferVisitor& visitor, vespalib::steady_time deadline) {
+    start_reads();
+    if (!_blocking.empty()) {
+        size_t group = _blocking.back();
+        _blocking.pop_back();
+        _store.read(_groups[group], visitor);
+        return group;
+    }
+    if (_reader->in_flight() == 0) {
+        return no_group;
+    }
+    auto completion = _reader->wait(deadline);
+    if (!completion.has_value()) {
+        return no_group;
+    }
+    ChunkRead read = std::move(_reads[completion->tag]);
+    size_t    group = read.group;
+    _free_tags.push_back(completion->tag);
+    start_reads(); // Keep the disk busy while the chunk is unpacked
+    if (completion->result == static_cast<ssize_t>(read.direct_read.length)) {
+        const char* data = static_cast<const char*>(read.buf.get()) + read.direct_read.pad_before;
+        Chunk       chunk(read.chunk_id, data, read.direct_read.size);
+        for (uint32_t lid : _groups[group]) {
+            vespalib::ConstBufferRef lid_buf = chunk.getLid(lid);
+            if (lid_buf.size() != 0) {
+                visitor.visit(lid, lid_buf);
+            }
+        }
+        ++_direct_reads;
+    } else {
+        // Let the regular batch read deal with the problem, and report it if it persists
+        _store.read(_groups[group], visitor);
+    }
+    return group;
+}
+
+std::unique_ptr<IDataStoreRead> LogDataStore::start_read(std::vector<LidVector> groups, uint32_t max_in_flight) const {
+    if (max_in_flight <= 1) {
+        return IDataStore::start_read(std::move(groups), max_in_flight);
+    }
+    return std::make_unique<AsyncRead>(*this, std::move(groups), max_in_flight);
 }
 
 void LogDataStore::write(uint64_t serialNum, uint32_t lid, const void* buffer, size_t len) {

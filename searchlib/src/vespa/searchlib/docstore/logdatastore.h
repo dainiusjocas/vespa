@@ -119,6 +119,8 @@ public:
     // Implements IDataStore API
     ssize_t read(uint32_t lid, vespalib::DataBuffer& buffer) const override;
     void read(const LidVector& lids, IBufferVisitor& visitor) const override;
+    uint64_t get_storage_unit(uint32_t lid) const override;
+    std::unique_ptr<IDataStoreRead> start_read(std::vector<LidVector> groups, uint32_t max_in_flight) const override;
     void write(uint64_t serialNum, uint32_t lid, const void* buffer, size_t len) override;
     void remove(uint64_t serialNum, uint32_t lid) override;
     void flush(uint64_t syncToken) override;
@@ -203,6 +205,7 @@ private:
     class WrapVisitor;
     class WrapVisitorProgress;
     class FileChunkHolder;
+    class AsyncRead;
 
     void setLid(const ISetLid::unique_lock& guard, uint32_t lid, const LidInfo& lm) override;
 

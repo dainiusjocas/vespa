@@ -54,6 +54,45 @@ private:
 };
 
 /**
+ * Accumulated numbers on how documents have been fetched as batches, see IDocumentStore::start_prefetch().
+ **/
+struct DocumentStorePrefetchStats {
+    uint64_t requests = 0;     // number of batches
+    uint64_t documents = 0;    // number of documents fetched
+    uint64_t reads = 0;        // number of reads (of a chunk) from the backing store
+    uint64_t direct_reads = 0; // number of those reading directly from a file, with several reads in flight
+};
+
+/**
+ * A batch of documents being fetched from a document store, see IDocumentStore::start_prefetch().
+ * Used by a single thread.
+ **/
+class IDocumentStorePrefetch {
+public:
+    using LidVector = std::vector<uint32_t>;
+    using DocumentUP = std::unique_ptr<document::Document>;
+    virtual ~IDocumentStorePrefetch() = default;
+
+    /**
+     * The lids being fetched.
+     **/
+    virtual const LidVector& lids() const = 0;
+
+    /**
+     * Fetch more of the documents.
+     * @return the lids that can now be passed to take(), empty when all lids have been returned
+     *         or the deadline expired while waiting for documents.
+     **/
+    virtual LidVector fetch_more(vespalib::steady_time deadline) = 0;
+
+    /**
+     * Take the document fetched for the given lid.
+     * @return NULL if no document was fetched for the lid (yet), or it has already been taken.
+     **/
+    virtual DocumentUP take(DocumentIdT lid, const document::DocumentTypeRepo& repo) = 0;
+};
+
+/**
  * Simple document store that contains serialized Document instances.
  * updates will be held in memory until flush() is called.
  * Uses a Local ID as key.
@@ -75,6 +114,14 @@ public:
     virtual DocumentUP read(DocumentIdT lid, const document::DocumentTypeRepo& repo) const = 0;
     virtual void visit(const LidVector& lidVector, const document::DocumentTypeRepo& repo,
                        IDocumentVisitor& visitor) const;
+
+    /**
+     * Start fetching the documents that a later read() of each of the given lids would have to
+     * get from disk, such that they can be read as a batch instead of one by one.
+     * @return NULL if batch fetching is not enabled, or none of the lids need it.
+     **/
+    virtual std::unique_ptr<IDocumentStorePrefetch> start_prefetch(const LidVector& lids) const;
+    virtual DocumentStorePrefetchStats getPrefetchStats() const { return {}; }
 
     /**
      * Serialize and store a document.

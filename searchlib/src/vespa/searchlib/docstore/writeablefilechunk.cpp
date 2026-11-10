@@ -237,6 +237,11 @@ uint32_t WriteableFileChunk::getNumChunks() const {
     return _chunkInfo.size();
 }
 
+bool WriteableFileChunk::get_direct_read(SubChunkId chunk, FileRandRead::DirectRead& direct_read) const {
+    // Chunks might still be in memory or being written until the file is frozen
+    return frozen() && FileChunk::get_direct_read(chunk, direct_read);
+}
+
 FileChunk::ChunkInfo WriteableFileChunk::get_chunk_info(uint32_t chunk_id) const {
     std::unique_lock lock(_lock, std::defer_lock);
     if (!frozen()) {

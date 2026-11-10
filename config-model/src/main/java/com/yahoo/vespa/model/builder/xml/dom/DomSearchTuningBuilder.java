@@ -205,6 +205,10 @@ public class DomSearchTuningBuilder extends VespaDomBuilder.DomConfigProducerBui
                         deployLogger.logApplicationPackage(Level.WARNING, "summary.io.write is deprecated and ignored.");
                     } else if (equals("read", e2)) {
                         sn.summary.io.read = Tuning.SearchNode.IoType.fromString(asString(e2));
+                    } else if (equals("prefetch", e2)) {
+                        sn.summary.io.prefetch = Tuning.SearchNode.Summary.Io.Prefetch.fromString(asString(e2));
+                    } else if (equals("prefetch-depth", e2)) {
+                        sn.summary.io.prefetchDepth = asInt(e2);
                     }
                 }
             } else if (equals("store", e)) {

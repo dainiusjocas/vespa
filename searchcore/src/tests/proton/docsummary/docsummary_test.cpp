@@ -233,7 +233,9 @@ public:
     AttributeWriter::UP                           _aw;
     ISummaryAdapter::SP                           _sa;
 
-    DBContext(std::shared_ptr<const DocumentTypeRepo> repo, const char* docTypeName)
+    using SummaryPrefetch = vespa::config::search::core::ProtonConfig::Summary::Read::Prefetch;
+    DBContext(std::shared_ptr<const DocumentTypeRepo> repo, const char* docTypeName,
+              SummaryPrefetch summary_prefetch = SummaryPrefetch::OFF)
         : _dmk(docTypeName),
           _fileHeaderContext(),
           _summaryExecutor(8),
@@ -253,6 +255,10 @@ public:
         (void)_made_dir;
         BootstrapConfigSetBuilder bootstrap_config_builder;
         bootstrap_config_builder.documenttypes = *_documenttypesConfig;
+        if (summary_prefetch != SummaryPrefetch::OFF) {
+            bootstrap_config_builder.proton.summary.read.prefetch = summary_prefetch;
+            bootstrap_config_builder.proton.summary.cache.maxbytes = 1000000;
+        }
         auto b = bootstrap_config_builder.build(1, _repo, _hwInfo);
         _configMgr.forwardConfig(b);
         _configMgr.nextGeneration(_shared_service.transport(), 0ms);
@@ -514,6 +520,84 @@ TEST(DocSummaryTest, requireThatDocsumRequestIsProcessed) {
     req.hits.emplace_back(gid9);
     DocsumReply::UP rep = dc._ddb->getDocsums(req);
     EXPECT_TRUE(assertSlime("{docsums:[ {docsum:{a:20}}, {docsum:{a:40}}, {} ]}", *rep));
+}
+
+class SummaryPrefetchTest : public ::testing::TestWithParam<DBContext::SummaryPrefetch> {};
+
+INSTANTIATE_TEST_SUITE_P(Modes, SummaryPrefetchTest,
+                         ::testing::Values(DBContext::SummaryPrefetch::SYNC, DBContext::SummaryPrefetch::IO_URING));
+
+TEST_P(SummaryPrefetchTest, require_that_docsum_request_is_processed) {
+    BuildContext bc([](auto& builder, auto& header) { header.addField("a", builder.intTypeRef()); });
+    DBContext    dc(bc.get_repo_sp(), getDocTypeName(), GetParam());
+    for (uint32_t lid = 1; lid <= 4; ++lid) {
+        auto doc = bc.make_document("id:ns:searchdocument::" + std::to_string(lid));
+        doc->setValue("a", IntFieldValue(lid * 10));
+        dc.put(*doc, lid);
+    }
+    auto& store = dc._ddb->getReadySubDB()->getSummaryManager()->getBackingStore();
+    EXPECT_EQ(0u, store.getCacheStats().elements);
+
+    // All documents must be fetched, one hit is repeated and one does not exist
+    DocsumRequest req;
+    req.resultClassName = "class1";
+    req.hits.emplace_back(gid4);
+    req.hits.emplace_back(gid9);
+    req.hits.emplace_back(gid2);
+    req.hits.emplace_back(gid4);
+    DocsumReply::UP rep = dc._ddb->getDocsums(req);
+    EXPECT_TRUE(assertSlime("{docsums:[ {docsum:{a:40}}, {}, {docsum:{a:20}}, {docsum:{a:40}} ]}", *rep));
+    EXPECT_EQ(2u, store.getCacheStats().elements);
+    EXPECT_EQ(2u, store.getCacheStats().misses);
+    EXPECT_EQ(1u, store.getCacheStats().hits); // The repeated hit
+
+    // Hits for cached documents are filled first, but the reply is in hit order
+    DocsumRequest req2;
+    req2.resultClassName = "class1";
+    req2.hits.emplace_back(gid1);
+    req2.hits.emplace_back(gid2);
+    req2.hits.emplace_back(gid3);
+    req2.hits.emplace_back(gid4);
+    rep = dc._ddb->getDocsums(req2);
+    EXPECT_TRUE(
+        assertSlime("{docsums:[ {docsum:{a:10}}, {docsum:{a:20}}, {docsum:{a:30}}, {docsum:{a:40}} ]}", *rep));
+    EXPECT_EQ(4u, store.getCacheStats().elements);
+    EXPECT_EQ(4u, store.getCacheStats().misses);
+    EXPECT_EQ(3u, store.getCacheStats().hits);
+
+    // Nothing to fetch
+    rep = dc._ddb->getDocsums(req2);
+    EXPECT_TRUE(
+        assertSlime("{docsums:[ {docsum:{a:10}}, {docsum:{a:20}}, {docsum:{a:30}}, {docsum:{a:40}} ]}", *rep));
+    EXPECT_EQ(4u, store.getCacheStats().misses);
+    EXPECT_EQ(7u, store.getCacheStats().hits);
+    auto stats = store.getPrefetchStats();
+    EXPECT_EQ(2u, stats.requests);
+    EXPECT_EQ(4u, stats.documents);
+}
+
+TEST_P(SummaryPrefetchTest, require_that_summaries_timeout) {
+    BuildContext bc([](auto& builder, auto& header) { header.addField("a", builder.intTypeRef()); });
+    DBContext    dc(bc.get_repo_sp(), getDocTypeName(), GetParam());
+    for (uint32_t lid = 1; lid <= 2; ++lid) {
+        auto doc = bc.make_document("id:ns:searchdocument::" + std::to_string(lid));
+        doc->setValue("a", IntFieldValue(lid * 10));
+        dc.put(*doc, lid);
+    }
+    DocsumRequest req;
+    req.setTimeout(vespalib::duration::zero());
+    req.resultClassName = "class1";
+    req.hits.emplace_back(gid1);
+    req.hits.emplace_back(gid2);
+    DocsumReply::UP rep = dc._ddb->getDocsums(req);
+    const auto&     root = rep->root();
+    EXPECT_EQ(2u, root["docsums"].entries());
+    EXPECT_FALSE(root["docsums"][0]["docsum"].valid());
+    EXPECT_FALSE(root["docsums"][1]["docsum"].valid());
+    EXPECT_EQ(root["errors"][0]["type"].asString(), vespalib::Memory("timeout"));
+    auto message = root["errors"][0]["message"].asString();
+    EXPECT_TRUE(std::regex_search(message.data, message.data + message.size,
+                                  std::regex("Timed out 2 summaries with -[0-9]+us left.")));
 }
 
 TEST(DocSummaryTest, requireThatRewritersAreUsed) {

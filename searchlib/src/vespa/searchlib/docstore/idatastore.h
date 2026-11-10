@@ -9,6 +9,8 @@
 #include <vespa/vespalib/util/time.h>
 
 #include <atomic>
+#include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -23,6 +25,28 @@ class IDataStoreVisitor {
 public:
     virtual ~IDataStoreVisitor() = default;
     virtual void visit(uint32_t lid, const void* buffer, size_t sz) = 0;
+};
+
+/**
+ * A read of several groups of lids in progress, see IDataStore::start_read().
+ * Used by a single thread.
+ **/
+class IDataStoreRead {
+public:
+    static constexpr size_t no_group = std::numeric_limits<size_t>::max();
+    virtual ~IDataStoreRead() = default;
+
+    /**
+     * Read one more of the groups, passing the data found for each of its lids to the visitor.
+     * @return the index of the group read, or no_group if all groups have been read or the deadline
+     *         expired while waiting for data. A read from disk already started is not interrupted.
+     **/
+    virtual size_t read_next(IBufferVisitor& visitor, vespalib::steady_time deadline) = 0;
+
+    /**
+     * The number of groups read so far by reading directly from files, with several reads in flight.
+     **/
+    virtual size_t direct_reads() const noexcept { return 0; }
 };
 
 class IDataStoreVisitorProgress {
@@ -59,6 +83,22 @@ public:
      **/
     virtual ssize_t read(uint32_t lid, vespalib::DataBuffer& buffer) const = 0;
     virtual void read(const LidVector& lids, IBufferVisitor& visitor) const = 0;
+
+    static constexpr uint64_t no_storage_unit = std::numeric_limits<uint64_t>::max();
+    /**
+     * Identifies the unit of storage (e.g. chunk) currently holding the data for the given lid.
+     * Reading several lids with the same storage unit as a batch costs a single read from disk.
+     * The storage unit changes when the data for the lid is moved or written to another unit.
+     * @return the storage unit, or no_storage_unit if there is no data for the lid.
+     **/
+    virtual uint64_t get_storage_unit(uint32_t lid) const;
+
+    /**
+     * Start reading groups of lids, where the lids in each group have the same storage unit.
+     * The groups are read in the order given unless max_in_flight is above 1; then up to that many
+     * storage units might be read from disk at the same time, and the groups are read in any order.
+     **/
+    virtual std::unique_ptr<IDataStoreRead> start_read(std::vector<LidVector> groups, uint32_t max_in_flight) const;
 
     /**
      * Write data to the data store.

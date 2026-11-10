@@ -11,6 +11,8 @@
 #include <vespa/vespalib/data/slime/slime.h>
 #include <vespa/vespalib/util/stringfmt.h>
 
+#include <algorithm>
+
 #include <vespa/log/log.h>
 LOG_SETUP(".proton.docsummary.docsumcontext");
 
@@ -71,20 +73,69 @@ vespalib::Slime::UP DocsumContext::createSlimeReply() {
     Cursor&      array = root.setArray(DOCSUMS);
     const Symbol docsumSym = response->insert(DOCSUM);
     _docsumState._omit_summary_features = (rci.res_class == nullptr) || rci.res_class->omit_summary_features();
-    uint32_t num_ok(0);
-    for (uint32_t docId : _docsumState._docsumbuf) {
-        if (_request.expired()) {
-            break;
-        }
-        Cursor&              docSumC = array.addObject();
+    const std::vector<uint32_t>& docids = _docsumState._docsumbuf;
+    auto                         insert_docsum = [&](Cursor& docSumC, uint32_t docId) {
         ObjectSymbolInserter inserter(docSumC, docsumSym);
         if ((docId != search::endDocId) && rci.res_class != nullptr) {
             _docsumWriter.insertDocsum(rci, docId, _docsumState, _docsumStore, inserter);
         }
-        num_ok++;
+    };
+    std::vector<uint32_t> prefetched;
+    if ((rci.res_class != nullptr) && !rci.all_fields_generated) {
+        prefetched = _docsumStore.start_prefetch(docids);
     }
-    if (num_ok != _docsumState._docsumbuf.size()) {
-        const uint32_t numTimedOut = _docsumState._docsumbuf.size() - num_ok;
+    uint32_t num_ok(0);
+    if (prefetched.empty()) {
+        for (uint32_t docId : docids) {
+            if (_request.expired()) {
+                break;
+            }
+            insert_docsum(array.addObject(), docId);
+            num_ok++;
+        }
+    } else {
+        // The hits not waiting for a document to be fetched are filled first, then the rest as their
+        // documents arrive. As hits are not filled in order, all entries must exist up front.
+        std::sort(prefetched.begin(), prefetched.end());
+        std::vector<Cursor*>                       entries;
+        std::vector<std::pair<uint32_t, uint32_t>> waiting; // docid, index of hit
+        entries.reserve(docids.size());
+        for (uint32_t i = 0; i < docids.size(); ++i) {
+            entries.push_back(&array.addObject());
+            if (std::binary_search(prefetched.begin(), prefetched.end(), docids[i])) {
+                waiting.emplace_back(docids[i], i);
+            }
+        }
+        std::sort(waiting.begin(), waiting.end());
+        for (uint32_t i = 0; (i < docids.size()) && !_request.expired(); ++i) {
+            if (!std::binary_search(prefetched.begin(), prefetched.end(), docids[i])) {
+                insert_docsum(*entries[i], docids[i]);
+                num_ok++;
+            }
+        }
+        uint32_t num_batches = 0;
+        while (!_request.expired()) {
+            std::vector<uint32_t> fetched = _docsumStore.fetch_more(_request.getTimeOfDoom());
+            if (fetched.empty()) {
+                break;
+            }
+            ++num_batches;
+            for (uint32_t docId : fetched) {
+                auto hit = std::lower_bound(waiting.begin(), waiting.end(), std::make_pair(docId, 0u));
+                for (; (hit != waiting.end()) && (hit->first == docId) && !_request.expired(); ++hit) {
+                    insert_docsum(*entries[hit->second], docId);
+                    num_ok++;
+                }
+            }
+        }
+        if (_request.trace().shouldTrace(5)) {
+            _request.trace().addEvent(5, make_string("Summary prefetch: %zu of %zu hits waited for %zu documents, "
+                                                     "fetched in %u batches",
+                                                     waiting.size(), docids.size(), prefetched.size(), num_batches));
+        }
+    }
+    if (num_ok != docids.size()) {
+        const uint32_t numTimedOut = docids.size() - num_ok;
         Cursor&        errors = root.setArray(ERRORS);
         Cursor&        timeout = errors.addObject();
         timeout.setString(TYPE, TIMEOUT);

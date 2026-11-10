@@ -13,6 +13,10 @@ void IDocumentStore::visit(const LidVector& lids, const document::DocumentTypeRe
     }
 }
 
+std::unique_ptr<IDocumentStorePrefetch> IDocumentStore::start_prefetch(const LidVector&) const {
+    return {};
+}
+
 void IDocumentStore::move(uint64_t syncToken, DocumentIdT, DocumentIdT toLid, const document::Document& doc) {
     write(syncToken, toLid, doc);
 }

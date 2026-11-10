@@ -46,6 +46,7 @@ public:
     bool Open(unsigned int openFlags, const char* filename) override;
     [[nodiscard]] bool Close() override;
     bool IsOpened() const override { return _filedes >= 0; }
+    int get_file_descriptor() const noexcept { return _filedes; }
 
     void enableMemoryMap(int flags) override {
         _mmapEnabled = true;

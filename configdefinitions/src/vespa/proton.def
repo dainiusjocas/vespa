@@ -281,6 +281,22 @@ summary.read.mmap.options[] enum {POPULATE, HUGETLB} restart
 ## Advise to give to os when mapping memory.
 summary.read.mmap.advise enum {NORMAL, RANDOM, SEQUENTIAL} default=NORMAL restart
 
+## Controls how the stored documents needed by a docsum request are read.
+## OFF: Documents are read one at a time in hit order.
+## SYNC: The documents not found in the summary cache are located up front and read chunk by chunk,
+##       such that a chunk shared by several hits is only read once.
+##       Hits found in the summary cache are filled first.
+## IO_URING: As SYNC, but the reading of chunks is started before the hits found in the summary cache
+##       are filled, with up to summary.read.prefetchdepth chunks being read at the same time using io_uring.
+##       This requires summary.read.io to be DIRECTIO; chunks in files read in another way are read as with SYNC.
+##       Chunks are read one at a time if io_uring is not available, e.g. due to it being blocked by a
+##       seccomp profile when running in a container.
+summary.read.prefetch enum {OFF, SYNC, IO_URING} default=OFF
+
+## The max number of chunks being read at the same time by a docsum request
+## when summary.read.prefetch is IO_URING.
+summary.read.prefetchdepth int default=32
+
 ## The name of the input document type
 documentdb[].inputdoctypename string
 ## The type of the documentdb

@@ -17,6 +17,7 @@ public:
     DirectIORandRead(const std::string& fileName);
     ~DirectIORandRead() override;
     FSP read(size_t offset, vespalib::DataBuffer& buffer, size_t sz) override;
+    bool get_direct_read(size_t offset, size_t sz, DirectRead& direct_read) const override;
     int64_t getSize() const override;
 
 private:

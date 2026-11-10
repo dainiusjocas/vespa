@@ -25,9 +25,14 @@
 #include <vespa/vespalib/util/size_literals.h>
 #include <vespa/vespalib/util/threadstackexecutor.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <iomanip>
+#include <map>
 #include <random>
+#include <set>
 
 using document::BucketId;
 using document::StringFieldValue;
@@ -828,6 +833,166 @@ TEST_F(LogDataStoreTest, testWriteRead) {
     if (!HasFailure()) {
         std::filesystem::remove_all(std::filesystem::path(empty));
     }
+}
+
+TEST_F(LogDataStoreTest, require_that_storage_unit_identifies_chunk) {
+    auto                 dir = build_testdata() + "/storage_unit";
+    LogDataStore::Config config;
+    config.setFileConfig({{CompressionConfig::LZ4, 9, 60}, 1000}); // At most 1000 bytes per chunk
+    std::filesystem::create_directory(std::filesystem::path(dir));
+    {
+        DummyFileHeaderContext        fileHeaderContext;
+        vespalib::ThreadStackExecutor executor(1);
+        MyTlSyncer                    tlSyncer;
+        LogDataStore datastore(executor, dir, config, GrowStrategy(), TuneFileSummary(), fileHeaderContext, tlSyncer,
+                               nullptr);
+        std::string small(100, 'a');
+        std::string large(1000, 'b');
+        EXPECT_EQ(IDataStore::no_storage_unit, datastore.get_storage_unit(1));
+        datastore.write(1, 1, small.data(), small.size());
+        datastore.write(2, 2, small.data(), small.size());
+        datastore.write(3, 3, large.data(), large.size()); // Fills the chunk
+        datastore.write(4, 4, small.data(), small.size());
+        EXPECT_NE(IDataStore::no_storage_unit, datastore.get_storage_unit(1));
+        EXPECT_EQ(datastore.get_storage_unit(1), datastore.get_storage_unit(2));
+        EXPECT_NE(IDataStore::no_storage_unit, datastore.get_storage_unit(4));
+        EXPECT_NE(datastore.get_storage_unit(1), datastore.get_storage_unit(4));
+        EXPECT_EQ(IDataStore::no_storage_unit, datastore.get_storage_unit(5));
+        EXPECT_EQ(IDataStore::no_storage_unit, datastore.get_storage_unit(1000000));
+
+        // Unchanged by flush, changed by a new write
+        uint64_t before_flush = datastore.get_storage_unit(1);
+        datastore.flush(datastore.initFlush(4));
+        EXPECT_EQ(before_flush, datastore.get_storage_unit(1));
+        datastore.write(5, 1, small.data(), small.size());
+        EXPECT_NE(before_flush, datastore.get_storage_unit(1));
+        EXPECT_EQ(before_flush, datastore.get_storage_unit(2));
+        datastore.remove(6, 2);
+        EXPECT_EQ(IDataStore::no_storage_unit, datastore.get_storage_unit(2));
+    }
+    std::filesystem::remove_all(std::filesystem::path(dir));
+}
+
+namespace {
+
+struct CollectingVisitor : IBufferVisitor {
+    std::map<uint32_t, std::string> data;
+    void visit(uint32_t lid, vespalib::ConstBufferRef buf) override { data[lid] = std::string(buf.c_str(), buf.size()); }
+};
+
+std::string lid_data(uint32_t lid) {
+    return "data for lid " + std::to_string(lid) + " " + std::string(300, 'a' + (lid % 26));
+}
+
+bool supports_direct_io(const std::string& dir) {
+    std::string file_name = dir + "/direct_io_probe";
+    int         fd = open(file_name.c_str(), O_RDWR | O_CREAT | O_DIRECT, 0644);
+    if (fd >= 0) {
+        close(fd);
+    }
+    std::filesystem::remove(file_name);
+    return fd >= 0;
+}
+
+} // namespace
+
+TEST_F(LogDataStoreTest, require_that_groups_of_lids_can_be_read_with_several_reads_in_flight) {
+    auto                 dir = build_testdata() + "/start_read";
+    LogDataStore::Config config;
+    config.setFileConfig({{CompressionConfig::LZ4, 9, 60}, 1000}); // At most 1000 bytes per chunk
+    TuneFileSummary tune;
+    tune._randRead.setWantDirectIO();
+    std::filesystem::create_directory(std::filesystem::path(dir));
+    const bool     direct_io = supports_direct_io(dir);
+    const uint32_t num_flushed_lids = 200;
+    const uint32_t num_lids = 220;
+    {
+        DummyFileHeaderContext        fileHeaderContext;
+        vespalib::ThreadStackExecutor executor(1);
+        MyTlSyncer                    tlSyncer;
+        LogDataStore datastore(executor, dir, config, GrowStrategy(), tune, fileHeaderContext, tlSyncer, nullptr);
+        for (uint32_t lid = 1; lid <= num_flushed_lids; ++lid) {
+            std::string data = lid_data(lid);
+            datastore.write(lid, lid, data.data(), data.size());
+        }
+        datastore.flush(datastore.initFlush(num_flushed_lids));
+    }
+    {
+        // The file written above is now read only, while later writes go to a new file
+        DummyFileHeaderContext        fileHeaderContext;
+        vespalib::ThreadStackExecutor executor(1);
+        MyTlSyncer                    tlSyncer;
+        LogDataStore datastore(executor, dir, config, GrowStrategy(), tune, fileHeaderContext, tlSyncer, nullptr);
+        for (uint32_t lid = num_flushed_lids + 1; lid <= num_lids; ++lid) {
+            std::string data = lid_data(lid);
+            datastore.write(lid, lid, data.data(), data.size());
+        }
+        // Every third lid, grouped by storage unit. Add a group with a lid without data.
+        std::map<uint64_t, IDataStore::LidVector> units;
+        for (uint32_t lid = 1; lid <= num_lids; lid += 3) {
+            ASSERT_NE(IDataStore::no_storage_unit, datastore.get_storage_unit(lid));
+            units[datastore.get_storage_unit(lid)].push_back(lid);
+        }
+        std::vector<IDataStore::LidVector> groups;
+        size_t                             num_flushed_groups = 0;
+        for (const auto& unit : units) {
+            groups.push_back(unit.second);
+            if (unit.second.front() <= num_flushed_lids) {
+                ++num_flushed_groups;
+            }
+        }
+        groups.push_back({num_lids + 1});
+        ASSERT_GT(num_flushed_groups, 10u);
+        ASSERT_GT(groups.size(), num_flushed_groups + 1);
+
+        for (uint32_t max_in_flight : {1, 4}) {
+            SCOPED_TRACE(max_in_flight);
+            auto              read = datastore.start_read(groups, max_in_flight);
+            CollectingVisitor visitor;
+            std::set<size_t>  groups_read;
+            for (;;) {
+                size_t before = visitor.data.size();
+                size_t group = read->read_next(visitor, vespalib::steady_time::max());
+                if (group == IDataStoreRead::no_group) {
+                    break;
+                }
+                ASSERT_LT(group, groups.size());
+                EXPECT_TRUE(groups_read.insert(group).second);
+                size_t exp_found = (group + 1 == groups.size()) ? 0 : groups[group].size();
+                EXPECT_EQ(before + exp_found, visitor.data.size());
+                for (uint32_t lid : groups[group]) {
+                    if (exp_found != 0) {
+                        EXPECT_EQ(lid_data(lid), visitor.data[lid]);
+                    }
+                }
+            }
+            EXPECT_EQ(groups.size(), groups_read.size());
+            EXPECT_EQ(IDataStoreRead::no_group, read->read_next(visitor, vespalib::steady_time::max()));
+            if ((max_in_flight > 1) && direct_io) {
+                EXPECT_EQ(num_flushed_groups, read->direct_reads());
+            } else {
+                EXPECT_EQ(0u, read->direct_reads());
+            }
+        }
+        {
+            // Abandoning a read in progress is fine
+            auto              read = datastore.start_read(groups, 4);
+            CollectingVisitor visitor;
+            EXPECT_NE(IDataStoreRead::no_group, read->read_next(visitor, vespalib::steady_time::max()));
+        }
+        {
+            // A lid written again is read from where it is now
+            std::string data = "new data";
+            uint32_t    lid = groups[0][0];
+            datastore.write(num_lids + 1, lid, data.data(), data.size());
+            auto              read = datastore.start_read({groups[0]}, 4);
+            CollectingVisitor visitor;
+            EXPECT_EQ(0u, read->read_next(visitor, vespalib::steady_time::max()));
+            EXPECT_EQ(groups[0].size(), visitor.data.size());
+            EXPECT_EQ(data, visitor.data[lid]);
+        }
+    }
+    std::filesystem::remove_all(std::filesystem::path(dir));
 }
 
 TEST_F(LogDataStoreTest, requireThatFlushTimeIsAvailableAfterFlush) {

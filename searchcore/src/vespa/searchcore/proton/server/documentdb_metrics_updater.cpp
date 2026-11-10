@@ -219,6 +219,7 @@ void updateDocumentStoreMetrics(DocumentDBTaggedMetrics::SubDBMetrics::DocumentS
     vespalib::CacheStats cacheStats = backingStore.getCacheStats();
     totalStats.memoryUsage.incAllocatedBytes(cacheStats.memory_used);
     metrics.cache.update_metrics(cacheStats);
+    metrics.prefetch.update(backingStore.getPrefetchStats());
 }
 
 void updateDocumentStoreMetrics(DocumentDBTaggedMetrics& metrics, const DocumentSubDBCollection& subDBs,

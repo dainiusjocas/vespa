@@ -200,6 +200,11 @@ public:
     void verify(bool reportOnly) const;
 
     [[nodiscard]] virtual uint32_t getNumChunks() const;
+    /**
+     * Describe how the caller can read the given chunk from the data file itself, see FileRandRead::get_direct_read().
+     * @return false if the chunk cannot be read that way, e.g. since it is not yet written to the file.
+     */
+    [[nodiscard]] virtual bool get_direct_read(SubChunkId chunk, FileRandRead::DirectRead& direct_read) const;
     [[nodiscard]] virtual ChunkInfo get_chunk_info(uint32_t chunk_id) const;
     size_t getNumBuckets() const { return _sumNumBuckets; }
     size_t getNumUniqueBuckets() const { return _numUniqueBuckets; }

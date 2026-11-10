@@ -314,6 +314,16 @@ public:
     void write(const K& key, V value);
 
     /**
+     * Insert a value that the caller has read from the backing store, unless the key
+     * is already present in the cache. Does not write through to the backing store.
+     * The insertion is subject to the same admission policy as an insertion caused
+     * by a read() cache miss.
+     *
+     * Returns true iff the value was inserted.
+     */
+    bool insert_if_absent(const K& key, V value);
+
+    /**
      * Notify the cache that value was updated in the backing store.
      */
     void updated(const K& key);

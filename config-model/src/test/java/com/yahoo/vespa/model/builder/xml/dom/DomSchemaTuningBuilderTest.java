@@ -176,6 +176,29 @@ public class DomSchemaTuningBuilderTest extends DomBuilderTest {
     }
 
     @Test
+    void requireThatWeCanParseSummaryPrefetch() {
+        Tuning t = createTuning(parseXml("<summary>", "<io>",
+                "<read>directio</read>",
+                "<prefetch>io_uring</prefetch>",
+                "<prefetch-depth>16</prefetch-depth>",
+                "</io>", "</summary>"));
+        assertEquals(Tuning.SearchNode.Summary.Io.Prefetch.IO_URING, t.searchNode.summary.io.prefetch);
+        assertEquals(16, t.searchNode.summary.io.prefetchDepth.intValue());
+        ProtonConfig cfg = getProtonCfg(t);
+        assertEquals(ProtonConfig.Summary.Read.Io.DIRECTIO, cfg.summary().read().io());
+        assertEquals(ProtonConfig.Summary.Read.Prefetch.IO_URING, cfg.summary().read().prefetch());
+        assertEquals(16, cfg.summary().read().prefetchdepth());
+
+        t = createTuning(parseXml("<summary>", "<io>", "<prefetch>sync</prefetch>", "</io>", "</summary>"));
+        cfg = getProtonCfg(t);
+        assertEquals(ProtonConfig.Summary.Read.Prefetch.SYNC, cfg.summary().read().prefetch());
+        assertEquals(32, cfg.summary().read().prefetchdepth());
+
+        cfg = getProtonCfg(createTuning(parseXml("<summary>", "<io>", "<read>directio</read>", "</io>", "</summary>")));
+        assertEquals(ProtonConfig.Summary.Read.Prefetch.OFF, cfg.summary().read().prefetch());
+    }
+
+    @Test
     void requireThatWeCanParseSummaryTag() {
         Tuning t = createTuning(parseXml("<summary>",
                 "<io>",

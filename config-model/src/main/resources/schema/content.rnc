@@ -374,7 +374,9 @@ Tuning = element tuning {
          element io {
             # summary.io.write is deprecated and will be gone on vespa 9
             element write { TuningIoOptionsLight }? &
-            element read { TuningIoOptionsFull }?
+            element read { TuningIoOptionsFull }? &
+            element prefetch { string "off" | string "sync" | string "io_uring" }? &
+            element prefetch-depth { xsd:positiveInteger }?
          }? &
          element store {
             element cache {

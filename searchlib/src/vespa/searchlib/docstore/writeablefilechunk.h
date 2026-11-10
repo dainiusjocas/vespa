@@ -110,6 +110,7 @@ private:
     std::unique_ptr<FastOS_FileInterface> openIdx(bool create);
     const Chunk& get_chunk(uint32_t chunk) const;
     [[nodiscard]] uint32_t getNumChunks() const override;
+    [[nodiscard]] bool get_direct_read(SubChunkId chunk, FileRandRead::DirectRead& direct_read) const override;
     [[nodiscard]] ChunkInfo get_chunk_info(uint32_t chunk_id) const override;
 
     Config            _config;

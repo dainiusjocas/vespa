@@ -384,6 +384,22 @@ template <typename P> void cache<P>::write(const K& key, V value) {
     }
 }
 
+template <typename P> bool cache<P>::insert_if_absent(const K& key, V value) {
+    UniqueLock guard(_hashLock);
+    if (hasKey(guard, key)) {
+        return false;
+    }
+    const auto new_freq = lfu_add_and_count(key);
+    if (!lfu_accepts_insertion(key, value, _probationary_segment, new_freq)) {
+        increment_stat(_lfu_dropped, guard);
+        return false;
+    }
+    _probationary_segment.insert_and_update_size(key, std::move(value));
+    onInsert(key);
+    increment_stat(_insert, guard);
+    return true;
+}
+
 template <typename P> void cache<P>::updated(const K& key) {
     V value;
     std::lock_guard storeGuard(getLock(key));

@@ -497,6 +497,14 @@ uint32_t FileChunk::getNumChunks() const {
     return _chunkInfo.size();
 }
 
+bool FileChunk::get_direct_read(SubChunkId chunk, FileRandRead::DirectRead& direct_read) const {
+    if (!_file || (chunk >= _chunkInfo.size())) {
+        return false;
+    }
+    const ChunkInfo& ci = _chunkInfo[chunk];
+    return _file->get_direct_read(ci.getOffset(), ci.getSize(), direct_read);
+}
+
 FileChunk::ChunkInfo FileChunk::get_chunk_info(uint32_t chunk_id) const {
     CHECK(chunk_id < _chunkInfo.size());
     return _chunkInfo[chunk_id];
