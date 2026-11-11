@@ -40,6 +40,7 @@ public:
                      search::IAttributeManager::SP attributeMgr, search::IDocumentStore::SP docStore,
                      std::shared_ptr<const search::IDocumentIdProvider> document_id_provider,
                      std::shared_ptr<const document::DocumentTypeRepo> repo, const search::index::Schema& schema);
+        ~SummarySetup() override;
 
         search::docsummary::IDocsumWriter& getDocsumWriter() const override { return *_docsumWriter; }
         const search::docsummary::ResultConfig& getResultConfig() override {
@@ -72,6 +73,8 @@ public:
     void putDocument(uint64_t syncToken, search::DocumentIdT lid, const document::Document& doc);
     void putDocument(uint64_t syncToken, search::DocumentIdT lid, const vespalib::nbostream& doc);
     void removeDocument(uint64_t syncToken, search::DocumentIdT lid);
+    void moveDocument(uint64_t syncToken, search::DocumentIdT prevLid, search::DocumentIdT lid,
+                      const document::Document& doc);
     searchcorespi::IFlushTarget::List getFlushTargets(vespalib::Executor& summaryService);
 
     ISummarySetup::SP createSummarySetup(const SummaryConfig& summaryCfg, const JuniperrcConfig& juniperCfg,

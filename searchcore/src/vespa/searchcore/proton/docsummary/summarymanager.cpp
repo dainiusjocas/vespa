@@ -46,9 +46,11 @@ namespace proton {
 
 namespace {
 
-std::unique_ptr<StructFieldsMapper> make_struct_fields_mapper(const search::attribute::IAttributeContext& ctx) {
+std::unique_ptr<StructFieldsMapper> make_struct_fields_mapper(const search::attribute::IAttributeContext& ctx,
+                                                              const search::index::Schema&                schema) {
     auto mapper = std::make_unique<StructFieldsMapper>();
     mapper->setup(ctx);
+    mapper->setup(schema);
     return mapper;
 }
 
@@ -74,7 +76,7 @@ SummaryManager::SummarySetup::SummarySetup(const std::string& baseDir, const Sum
     std::unique_ptr<IQueryTermFilterFactory> query_term_filter_factory =
         std::make_unique<QueryTermFilterFactory>(schema);
     auto docsum_field_writer_factory = std::make_unique<DocsumFieldWriterFactory>(*this, *query_term_filter_factory);
-    auto struct_fields_mapper = make_struct_fields_mapper(*_attributeMgr->createContext());
+    auto struct_fields_mapper = make_struct_fields_mapper(*_attributeMgr->createContext(), schema);
     if (!resultConfig->readConfig(summaryCfg, make_string("SummaryManager(%s)", baseDir.c_str()),
                                   *docsum_field_writer_factory, *struct_fields_mapper))
     {
@@ -89,6 +91,8 @@ SummaryManager::SummarySetup::SummarySetup(const std::string& baseDir, const Sum
 
     _docsumWriter = std::make_unique<DynamicDocsumWriter>(std::move(resultConfig));
 }
+
+SummaryManager::SummarySetup::~SummarySetup() = default;
 
 IDocsumStore::UP SummaryManager::SummarySetup::createDocsumStore() {
     return std::make_unique<DocumentStoreAdapter>(*_docStore, *_repo);
@@ -131,6 +135,11 @@ void SummaryManager::putDocument(uint64_t syncToken, search::DocumentIdT lid, co
 
 void SummaryManager::removeDocument(uint64_t syncToken, search::DocumentIdT lid) {
     _docStore->remove(syncToken, lid);
+}
+
+void SummaryManager::moveDocument(uint64_t syncToken, search::DocumentIdT prevLid, search::DocumentIdT lid,
+                                  const Document& doc) {
+    _docStore->move(syncToken, prevLid, lid, doc);
 }
 
 namespace {

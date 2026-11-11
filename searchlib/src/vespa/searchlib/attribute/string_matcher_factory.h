@@ -2,8 +2,10 @@
 
 #pragma once
 
+#include "string_fuzzy_matcher.h"
 #include "string_matcher.h"
 #include "string_range_matcher.h"
+#include "string_regex_matcher.h"
 
 #include <vespa/searchlib/query/query_term_simple.h>
 #include <vespa/vespalib/fuzzy/fuzzy_matching_algorithm.h>
@@ -24,11 +26,17 @@ public:
     template <typename Func>
     static auto create_and_apply(std::unique_ptr<QueryTermSimple> query_term, bool cased,
                                  vespalib::FuzzyMatchingAlgorithm fuzzy_matching_algorithm, Func&& func) {
-        if (query_term && query_term->get_string_range_spec()) {
-            return func(StringRangeMatcher(std::move(query_term), cased));
-        } else {
-            return func(StringMatcher(std::move(query_term), cased, fuzzy_matching_algorithm));
+        if (query_term) {
+            if (query_term->get_string_range_spec()) {
+                return func(StringRangeMatcher(std::move(query_term), cased));
+            } else if (query_term->isFuzzy()) {
+                return func(StringFuzzyMatcher(std::move(query_term), cased, fuzzy_matching_algorithm));
+            } else if (query_term->isRegex()) {
+                return func(StringRegexMatcher(std::move(query_term), cased));
+            }
         }
+
+        return func(StringMatcher(std::move(query_term), cased));
     }
 };
 

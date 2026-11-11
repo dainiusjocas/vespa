@@ -39,7 +39,7 @@ public class GroupingValidator extends Searcher {
     public static final CompoundName PARAM_ENABLED = CompoundName.from("validate_" + GroupingQueryParser.PARAM_REQUEST);
     private final HashMap<String, AttributesConfig.Attribute> attributes = new HashMap<>();
     private final String clusterName;
-    private final boolean enabled;
+    private final boolean streamingMode;
 
     /**
      * Constructs a new instance of this searcher with the given component id and config.
@@ -48,7 +48,7 @@ public class GroupingValidator extends Searcher {
      */
     @Inject
     public GroupingValidator(ClusterConfig clusterConfig, AttributesConfig attributesConfig) {
-        enabled = (clusterConfig.indexMode() != ClusterConfig.IndexMode.Enum.STREAMING);
+        streamingMode = (clusterConfig.indexMode() == ClusterConfig.IndexMode.Enum.STREAMING);
         clusterName = clusterConfig.clusterName();
         for (AttributesConfig.Attribute attr : attributesConfig.attribute()) {
             attributes.put(attr.name(), attr);
@@ -57,12 +57,14 @@ public class GroupingValidator extends Searcher {
 
     @Override
     public Result search(Query query, Execution execution) {
-        if (enabled && query.properties().getBoolean(PARAM_ENABLED, true)) {
-            ExpressionVisitor visitor = new MyVisitor();
-            for (GroupingRequest req : query.getSelect().getGrouping())
-                req.getRootOperation().visitExpressions(visitor);
-        }
+        if ( ! streamingMode && query.properties().getBoolean(PARAM_ENABLED, true))
+            visitExpressions(query, new MyVisitor());
         return execution.search(query);
+    }
+
+    private static void visitExpressions(Query query, ExpressionVisitor visitor) {
+        for (GroupingRequest req : query.getSelect().getGrouping())
+            req.getRootOperation().visitExpressions(visitor);
     }
 
     static private String datatypeAsString(AttributesConfig.Attribute attribute) {

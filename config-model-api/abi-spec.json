@@ -326,10 +326,13 @@
     ],
     "methods" : [
       "public void <init>(boolean, boolean, boolean, com.yahoo.config.application.api.TimeWindow)",
+      "public void <init>(boolean, boolean, boolean, com.yahoo.config.application.api.TimeWindow, java.util.Set)",
       "public boolean blocksRevisions()",
       "public boolean blocksVersions()",
       "public boolean blocksMaintenance()",
       "public com.yahoo.config.application.api.TimeWindow window()",
+      "public java.util.Set regions()",
+      "public boolean appliesTo(java.util.Optional)",
       "public java.lang.String toString()"
     ],
     "fields" : [ ]
@@ -1535,21 +1538,25 @@
       "public int maxContentNodeMaintenanceOpConcurrency()",
       "public com.yahoo.config.model.api.ModelContext$FeatureFlag useTritonFlag()",
       "public com.yahoo.config.model.api.ModelContext$FeatureFlag tritonShareOnnxSessionFlag()",
+      "public com.yahoo.config.model.api.ModelContext$FeatureFlag tritonOnnxPoolingFlag()",
       "public boolean ignoreConnectivityChecksAtStartup()",
+      "public boolean skipConnectivityChecksAtStartup()",
       "public boolean requireExplicitDocprocCluster()",
       "public com.yahoo.config.model.api.ModelContext$FeatureFlag metricsProxyHeapSizeInMibFlag()",
       "public java.util.OptionalInt metricsProxyAdminNodeHeapSizeInMib()",
       "public double searchNodeReservedMemoryFactor()",
       "public boolean forceDisableOnnxModelOptimization()",
       "public boolean failWhenConfiguringIndexedMapOfArray()",
+      "public java.lang.String allowStructFieldIndex()",
       "public boolean protonLogWarningOnDiskCapacityChange()",
       "public boolean protonResampleDiskCapacity()",
       "public boolean fastMapSearch()",
-      "public boolean relaxStrictlyIncreasingClusterStateVersions()",
+      "public boolean requireStrictlyIncreasingClusterStateVersions()",
       "public boolean commerceDiscovery()",
       "public boolean enableLandlock()",
       "public boolean enableLegacyFeedHandler()",
-      "public boolean productDiscovery()"
+      "public boolean productDiscovery()",
+      "public boolean useMlModelImportCache()"
     ],
     "fields" : [ ]
   },
@@ -1642,6 +1649,7 @@
       "public abstract com.yahoo.config.model.api.ModelContext$Properties properties()",
       "public java.util.Optional appDir()",
       "public abstract com.yahoo.config.model.api.OnnxModelCost onnxModelCost()",
+      "public java.util.Optional mlModelImportCacheDir()",
       "public java.util.Optional wantedDockerImageRepo()",
       "public abstract com.yahoo.component.Version modelVespaVersion()",
       "public abstract com.yahoo.component.Version wantedNodeVespaVersion()"

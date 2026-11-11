@@ -2,22 +2,29 @@
 
 #pragma once
 
+#include "i_enum_store_dictionary.h"
 #include "string_search_helper.h"
 
+#include <vespa/searchlib/query/query_term_ucs4.h>
 #include <vespa/vespalib/fuzzy/fuzzy_matching_algorithm.h>
 
 namespace search {
-class QueryTermSimple;
 template <class EntryT> class EnumStoreT;
+class QueryTermSimple;
 } // namespace search
+
+namespace search::queryeval {
+class ExecuteInfo;
+} // namespace search::queryeval
 
 namespace search::attribute {
 
 class EnumHintSearchContext;
+class IDictionaryLookup;
 
 /*
  * Class used to determine if an attribute vector string value is a match for
- * the query string value.
+ * the exact or prefix query term.
  */
 class StringMatcher {
 private:
@@ -25,27 +32,21 @@ private:
     attribute::StringSearchHelper  _helper;
 
 public:
-    StringMatcher(std::unique_ptr<QueryTermSimple> qTerm, bool cased,
-                  vespalib::FuzzyMatchingAlgorithm fuzzy_matching_algorithm);
+    StringMatcher(std::unique_ptr<QueryTermSimple> qTerm, bool cased);
     StringMatcher(StringMatcher&&) noexcept;
     ~StringMatcher();
 
-    bool isValid() const;
-    bool match(const char* src) const { return _helper.isMatch(src); }
-    bool isPrefix() const { return _helper.isPrefix(); }
-    bool isRegex() const { return _helper.isRegex(); }
-    bool isCased() const { return _helper.isCased(); }
-    bool isFuzzy() const { return _helper.isFuzzy(); }
-    const vespalib::Regex& getRegex() const { return _helper.getRegex(); }
-    const vespalib::FuzzyMatcher& getFuzzyMatcher() const { return _helper.getFuzzyMatcher(); }
-    const QueryTermUCS4* get_query_term_ptr() const noexcept { return _query_term.get(); }
+    [[nodiscard]] bool is_valid() const { return _query_term && (!_query_term->empty()); }
+    [[nodiscard]] bool match(const char* src) const { return _helper.is_match(src); }
+    [[nodiscard]] const QueryTermUCS4* get_query_term_ptr() const noexcept { return _query_term.get(); }
 
-    template <typename DictionaryConstIteratorType>
-    bool is_fuzzy_match(const char* word, DictionaryConstIteratorType& itr,
-                        const DfaStringComparator::DataStoreType& data_store) const {
-        return _helper.is_fuzzy_match(word, itr, data_store);
-    }
-    void setup_enum_hint_sc(const EnumStoreT<const char*>& enum_store, EnumHintSearchContext& enum_hint_sc);
+    /*
+     * Methods for dictionary lookups. Used by StringPostingSearchContext.
+     * lookup_in_dictionary is also used by StringSearchContext with an EnumHintSearchContext.
+     */
+    bool lookup_in_dictionary(const EnumStoreT<const char*>& enum_store, IDictionaryLookup& dict) const;
+    bool use_dictionary_entry(const EnumStoreT<const char*>& enum_store, EnumPostingTree::ConstIterator& it) const;
+    bool use_posting_lists_when_non_strict(const queryeval::ExecuteInfo& info, uint32_t docid_limit) const;
 };
 
 } // namespace search::attribute

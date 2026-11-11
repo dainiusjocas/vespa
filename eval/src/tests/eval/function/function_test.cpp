@@ -794,6 +794,17 @@ TEST(FunctionTest, require_that_tensor_reduce_with_unknown_aggregator_fails) {
     verify_error("reduce(x,bogus)", "[reduce(x,bogus]...[unknown aggregator: 'bogus']...[)]");
 }
 
+TEST(FunctionTest, require_that_explicit_parameter_names_cannot_contain_duplicates) {
+    auto function = Function::parse({"x", "y", "x"}, "x+y");
+    EXPECT_TRUE(function->has_error());
+    EXPECT_EQ("[]...[duplicate parameter names]...[x+y]", function->get_error());
+}
+
+TEST(FunctionTest, require_that_lambda_parameter_names_cannot_contain_duplicates) {
+    verify_error("map(x,f(a,a)(a))", "[map(x,f(a,a)]...[duplicate identifiers]...[(a))]");
+    verify_error("join(x,y,f(a,a)(a+a))", "[join(x,y,f(a,a)]...[duplicate identifiers]...[(a+a))]");
+}
+
 TEST(FunctionTest, require_that_tensor_reduce_with_duplicate_dimensions_fails) {
     verify_error("reduce(x,sum,a,a)", "[reduce(x,sum,a,a]...[duplicate identifiers]...[)]");
 }
@@ -889,6 +900,13 @@ TEST(FunctionTest, require_that_verbose_tensor_create_detects_invalid_dimension_
 
 TEST(FunctionTest, require_that_verbose_tensor_create_detects_out_of_bounds_indexes_for_indexed_dimensions) {
     verify_error("tensor(x[1]):{{x:1}:1}", "[tensor(x[1]):{{x:1]...[dimension index too large: 1]...[}:1}]");
+    // would wrap to 0 if truncated to 32 bits
+    verify_error("tensor(x[1]):{{x:4294967296}:1}",
+                 "[tensor(x[1]):{{x:4294967296]...[dimension index too large: 4294967296]...[}:1}]");
+    // does not fit in 64 bits
+    verify_error(
+        "tensor(x[1]):{{x:99999999999999999999}:1}",
+        "[tensor(x[1]):{{x:99999999999999999999]...[dimension index too large: 99999999999999999999]...[}:1}]");
 }
 
 TEST(FunctionTest, require_that_verbose_tensor_create_detects_non_numeric_indexes_for_indexed_dimensions) {
@@ -958,6 +976,11 @@ TEST(FunctionTest, require_that_convenient_tensor_create_allows_under_specified_
 
 TEST(FunctionTest, require_that_convenient_tensor_create_detects_invalid_tensor_type) {
     verify_error("tensor(x[,y}):ignored", "[tensor(x[,y})]...[invalid tensor type]...[:ignored]");
+}
+
+TEST(FunctionTest, require_that_tensor_types_with_empty_dimension_names_are_rejected) {
+    verify_error("tensor([3]):[1,2,3]*2", "[tensor([3])]...[invalid tensor type]...[:[1,2,3]*2]");
+    verify_error("tensor(x[2],[2])(x)", "[tensor(x[2],[2])]...[invalid tensor type]...[(x)]");
 }
 
 TEST(FunctionTest, require_that_convenient_tensor_create_detects_too_large_indexed_dimensions) {

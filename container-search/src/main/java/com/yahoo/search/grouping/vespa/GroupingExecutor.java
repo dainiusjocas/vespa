@@ -12,6 +12,7 @@ import com.yahoo.processing.request.CompoundName;
 import com.yahoo.search.Query;
 import com.yahoo.search.Result;
 import com.yahoo.search.Searcher;
+import com.yahoo.search.grouping.GroupingQueryParser;
 import com.yahoo.search.grouping.GroupingRequest;
 import com.yahoo.search.grouping.GroupingValidator;
 import com.yahoo.search.grouping.result.Group;
@@ -53,6 +54,7 @@ public class GroupingExecutor extends Searcher {
     private static final int DEFAULT_MAX_GROUPS = 10;
     private static final int DEFAULT_MAX_HITS = 10;
     private static final long DEFAULT_GLOBAL_MAX_GROUPS = 10000;
+    private static final String ENUM_OPTIMIZATION_RANK_PROPERTY = "vespa.grouping.enum_optimization";
 
     /**
      * Constructs a new instance of this searcher without configuration.
@@ -88,6 +90,10 @@ public class GroupingExecutor extends Searcher {
 
         if (groupingMap.isEmpty()) return execution.search(query);
 
+        if (shouldDisableEnumOptimization(query)) {
+            query.getRanking().getProperties().put(ENUM_OPTIMIZATION_RANK_PROPERTY, "false");
+        }
+
         // Perform the necessary passes to execute grouping.
         Result result = performSearch(query, execution, groupingMap);
 
@@ -98,6 +104,10 @@ public class GroupingExecutor extends Searcher {
             result.hits().add(group);
         }
         return result;
+    }
+
+    private boolean shouldDisableEnumOptimization(Query query) {
+        return ! query.properties().getBoolean(GroupingQueryParser.PARAM_ENUM_OPTIMIZATION, true);
     }
 
     private String extractSummaryClass(Hit hit, String summaryClass) {

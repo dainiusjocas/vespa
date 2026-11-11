@@ -9,6 +9,7 @@ vespa_define_module(
     vespa_metrics
     vespa_document
     vespa_config
+    vespa_opentelemetry
 
     EXTERNAL_DEPENDS
     ${VESPA_GLIBC_RT_LIB}
@@ -107,6 +108,7 @@ vespa_define_module(
     src/tests/bitcompression/expgolomb
     src/tests/bitvector
     src/tests/common/bitvector
+    src/tests/common/document_field_extractor
     src/tests/common/geogcd
     src/tests/common/location
     src/tests/common/location_iterator
@@ -134,6 +136,7 @@ vespa_define_module(
     src/tests/engine/proto_rpc_adapter
     src/tests/expression/attributenode
     src/tests/expression/current_index_setup
+    src/tests/expression/decode_fast_map_lookup_node
     src/tests/expression/filter_predicate_node
     src/tests/expression/float_bucket_result_node
     src/tests/expression/interpolated_document_field_lookup_node
@@ -229,6 +232,7 @@ vespa_define_module(
     src/tests/queryeval/same_element
     src/tests/queryeval/simple_phrase
     src/tests/queryeval/sourceblender
+    src/tests/queryeval/sparse_tensor_wand
     src/tests/queryeval/sparse_vector_benchmark
     src/tests/queryeval/termwise_eval
     src/tests/queryeval/weak_and

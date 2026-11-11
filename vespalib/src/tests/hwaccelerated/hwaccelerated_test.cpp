@@ -5,6 +5,8 @@
 
 #include <vespa/check_require.h>
 #include <vespa/vespalib/gtest/gtest.h>
+#include <vespa/vespalib/hwaccelerated/centroid.h>
+#include <vespa/vespalib/hwaccelerated/eden_codebooks.h>
 #include <vespa/vespalib/hwaccelerated/float4.h>
 #include <vespa/vespalib/hwaccelerated/float8_luts.h>
 #include <vespa/vespalib/hwaccelerated/fn_table.h>
@@ -12,8 +14,11 @@
 #include <vespa/vespalib/hwaccelerated/highway.h>
 #include <vespa/vespalib/hwaccelerated/iaccelerated.h>
 
+#include <vespa/vespalib/hwaccelerated/scalar_block_bit_packing.hpp>
+
 #include <gmock/gmock.h>
 
+#include <format>
 #include <limits>
 #include <random>
 
@@ -320,6 +325,412 @@ TEST_F(HwAcceleratedTest, binary_hamming_distance_with_alignments) {
     std::vector<std::pair<size_t, size_t>> lhs_rhs_unalignments = {{0, 0}, {1, 0}, {0, 1}, {3, 0}, {0, 7}, {2, 6}};
     for (const auto& [lhs_unalign, rhs_unalign] : lhs_rhs_unalignments) {
         ASSERT_NO_FATAL_FAILURE(check_with_sizes(accelerators, lhs_unalign, rhs_unalign));
+    }
+}
+
+namespace {
+
+// We make the assumption that the scalar "reference" code is correct, and that
+// all other implementations must be bitwise identical in their packed output.
+void bit_pack_reference_output(const uint8_t* raw, uint8_t* packed, const uint8_t bits, size_t sz) noexcept {
+    switch (bits) {
+    case 1:
+        return scalar_block_bit_pack<1>(raw, packed, sz);
+    case 2:
+        return scalar_block_bit_pack<2>(raw, packed, sz);
+    case 3:
+        return scalar_block_bit_pack<3>(raw, packed, sz);
+    case 4:
+        return scalar_block_bit_pack<4>(raw, packed, sz);
+    default:
+        abort();
+    }
+}
+
+} // namespace
+
+// TODO dedupe with MultiBitPacker tests, possibly by removing the latter code entirely...!
+
+void do_test_bit_packing_of_all_representable_values(const uint8_t bits, std::span<const IAccelerated*> accels) {
+    SCOPED_TRACE("bit packing of all representable values");
+    for (uint8_t v = 0; v < (1u << bits); ++v) {
+        // Test a range of sizes that includes multiple full 128-bit blocks with and without remainders.
+        for (size_t n = 0; n < 48; ++n) {
+            // Test with destination arrays (both for packing and unpacking) that
+            // are all zeroes and all ones to ensure we do not accidentally leave
+            // dirty bits behind from the destination.
+            for (const uint8_t packed_init_value : {0x00, 0xff}) {
+                for (const uint8_t unpacked_init_value : {0x00, 0xff}) {
+                    std::vector<uint8_t> in(n, v);
+                    std::vector<uint8_t> reference_packed(packed_bytes(bits, n));
+                    std::vector<uint8_t> accel_packed(packed_bytes(bits, n), packed_init_value);
+                    std::vector<uint8_t> accel_unpacked(n, unpacked_init_value);
+
+                    bit_pack_reference_output(in.data(), reference_packed.data(), bits, n);
+                    for (const auto* accel : accels) {
+                        SCOPED_TRACE(accel->target_info().to_string());
+                        ScopedFnTableOverride fn_scope(accel->fn_table());
+
+                        pack_bits(in.data(), accel_packed.data(), bits, n);
+                        ASSERT_THAT(accel_packed, ElementsAreArray(reference_packed))
+                            << "n=" << n << ", v=" << int(v) << ", packed_init_value=" << int(packed_init_value)
+                            << ", unpacked_init_value=" << int(unpacked_init_value);
+
+                        unpack_bits(accel_packed.data(), accel_unpacked.data(), bits, n);
+                        ASSERT_THAT(accel_unpacked, ElementsAreArray(in))
+                            << "n=" << n << ", v=" << int(v) << ", packed_init_value=" << int(packed_init_value)
+                            << ", unpacked_init_value=" << int(unpacked_init_value);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Just testing with the same value for all packed/unpacked elements hides
+// possible permutation errors, so also test with random element values.
+void do_test_bit_packing_of_randomized_values(const uint8_t bits, std::span<const IAccelerated*> accels) {
+    SCOPED_TRACE("bit packing of randomized values");
+    const uint64_t         seed = std::random_device{}();
+    Xoshiro256PlusPlusPrng prng(seed);
+
+    auto gen_rand_value = [&prng, bits]() noexcept { return prng() & ((1u << bits) - 1); };
+
+    for (size_t n = 1; n < 64; ++n) {
+        // Reuse vectors across rounds to help catch any dirty bit reuse
+        std::vector<uint8_t> in(n);
+        std::vector<uint8_t> reference_packed(packed_bytes(bits, n));
+        std::vector<uint8_t> accel_packed(packed_bytes(bits, n));
+        std::vector<uint8_t> accel_unpacked(n);
+        constexpr size_t     N = 1'000;
+
+        for (size_t i = 0; i < N; ++i) {
+            std::ranges::generate(in, gen_rand_value);
+            bit_pack_reference_output(in.data(), reference_packed.data(), bits, n);
+
+            for (const auto* accel : accels) {
+                SCOPED_TRACE(accel->target_info().to_string());
+                ScopedFnTableOverride fn_scope(accel->fn_table());
+
+                pack_bits(in.data(), accel_packed.data(), bits, n);
+                ASSERT_THAT(accel_packed, ElementsAreArray(reference_packed))
+                    << "n=" << n << ", seed=" << std::hex << seed;
+
+                unpack_bits(accel_packed.data(), accel_unpacked.data(), bits, n);
+                ASSERT_THAT(accel_unpacked, ElementsAreArray(in)) << "n=" << n << ", seed=" << std::hex << seed;
+            }
+        }
+    }
+}
+
+void do_test_remainder_bits_are_zeroed(const uint8_t bits, std::span<const IAccelerated*> accels) {
+    SCOPED_TRACE("remainder bits are zeroed");
+    ASSERT_EQ(packed_bytes(bits, 1), 1);
+    for (const auto* accel : accels) {
+        SCOPED_TRACE(accel->target_info().to_string());
+        ScopedFnTableOverride fn_scope(accel->fn_table());
+
+        std::array<uint8_t, 1> dst{};
+        std::array<uint8_t, 1> src = {uint8_t((1u << bits) - 1)};
+        pack_bits(src.data(), dst.data(), bits, 1);
+        // Every 1-element packing fits within a byte and should live in its LSBs.
+        // The MSBs should then consequently be zero. This is not an exhaustive test.
+        const uint8_t msb_mask = static_cast<uint8_t>(0xff << bits);
+        ASSERT_EQ(dst[0] & msb_mask, 0);
+    }
+}
+
+void do_run_bit_pack_unpack_tests(const uint8_t bits) {
+    auto accelerators = all_accelerators_to_test();
+    ASSERT_NO_FATAL_FAILURE(do_test_bit_packing_of_all_representable_values(bits, accelerators));
+    ASSERT_NO_FATAL_FAILURE(do_test_bit_packing_of_randomized_values(bits, accelerators));
+    ASSERT_NO_FATAL_FAILURE(do_test_remainder_bits_are_zeroed(bits, accelerators));
+}
+
+TEST_F(HwAcceleratedTest, can_pack_and_unpack_1_bit_values) {
+    do_run_bit_pack_unpack_tests(1);
+}
+
+TEST_F(HwAcceleratedTest, can_pack_and_unpack_2_bit_values) {
+    do_run_bit_pack_unpack_tests(2);
+}
+
+TEST_F(HwAcceleratedTest, can_pack_and_unpack_3_bit_values) {
+    do_run_bit_pack_unpack_tests(3);
+}
+
+TEST_F(HwAcceleratedTest, can_pack_and_unpack_4_bit_values) {
+    do_run_bit_pack_unpack_tests(4);
+}
+
+namespace {
+
+void check_f32_q_dot_product_eq(std::span<const IAccelerated*> accels, std::span<const float> lhs,
+                                std::span<const uint8_t> packed_rhs, const uint8_t bits, const size_t sz,
+                                const float expected) {
+    for (const auto* accel : accels) {
+        SCOPED_TRACE(accel->target_info().to_string());
+        ScopedFnTableOverride fn_scope(accel->fn_table());
+        const float           actual = eden_f32_q_dot_product(lhs.data(), packed_rhs.data(), bits, sz);
+        // Floating point errors compound with dimensionality, so fudge the epsilon a bit to compensate.
+        ASSERT_THAT(actual, FloatNear(expected, 0.000001 * sz)) << "with bits=" << int(bits) << ", length=" << sz;
+    }
+}
+
+void check_q_q_dot_product_eq(std::span<const IAccelerated*> accels, std::span<const uint8_t> packed_lhs,
+                              std::span<const uint8_t> packed_rhs, const uint8_t bits, const size_t sz,
+                              const float expected) {
+    for (const auto* accel : accels) {
+        SCOPED_TRACE(accel->target_info().to_string());
+        ScopedFnTableOverride fn_scope(accel->fn_table());
+        const float           actual = eden_q_q_dot_product(packed_lhs.data(), packed_rhs.data(), bits, sz);
+        ASSERT_THAT(actual, FloatNear(expected, 0.000001 * sz)) << "with bits=" << int(bits) << ", length=" << sz;
+    }
+}
+
+// SIMD quantized vector processing requires juggling multiple vector BF16 LUT lookups and
+// fusing them into new, wider vectors. Getting things wrong here (e.g. wrong high/low vector
+// part extraction, wrong lane interleaving etc.) is uncomfortably easy. This test does its
+// best to explicitly test that each f32 and quantized dimension is properly aligned during
+// vectorized dot product computation.
+void verify_eden_f32_q_dot_product_no_lane_confusion(std::span<const IAccelerated*> accels, const uint8_t bits,
+                                                     const size_t test_length) {
+    CHECK(bits >= 1 && bits <= 4);
+    const auto codebook = codebooks::eden_bf16_codebook(bits);
+
+    std::vector<float>   lhs(test_length);
+    std::vector<uint8_t> rhs_idx(test_length);
+    const uint8_t        highest_centroid_value_idx = (1u << bits) - 1;
+    const uint8_t        lowest_centroid_value_idx = highest_centroid_value_idx / 2;
+    std::ranges::fill(rhs_idx, lowest_centroid_value_idx);
+    std::vector<uint8_t> packed(packed_bytes(bits, test_length));
+
+    const float c = codebook[highest_centroid_value_idx];
+    const float expected = 100.0f * c;
+    for (size_t i = 0; i < test_length; ++i) {
+        // Only have a non-zero f32 element and a positive centroid index in a single position.
+        // The dot product should then always be equal to that value*the matching highest
+        // centroid value.
+        lhs[i] = 100.0f;
+        rhs_idx[i] = highest_centroid_value_idx;
+
+        bit_pack_reference_output(rhs_idx.data(), packed.data(), bits, test_length);
+        ASSERT_NO_FATAL_FAILURE(check_f32_q_dot_product_eq(accels, lhs, packed, bits, test_length, expected));
+        // Conversely, zeroing out this position should result in a dot product of zero.
+        // This also conveniently leaves us with an all-zero vector for the next iteration.
+        lhs[i] = 0.0f;
+        ASSERT_NO_FATAL_FAILURE(check_f32_q_dot_product_eq(accels, lhs, packed, bits, test_length, 0));
+        rhs_idx[i] = lowest_centroid_value_idx; // Reset for next position iteration
+    }
+}
+
+void verify_eden_f32_q_dot_product(std::span<const IAccelerated*> accels, const uint8_t bits,
+                                   const size_t test_length) {
+    CHECK(bits >= 1 && bits <= 4);
+    CHECK(test_length >= 32); // Due to boundary testing
+    const auto             codebook = codebooks::eden_bf16_codebook(bits);
+    Xoshiro256PlusPlusPrng prng(0x1baaadf00000d);
+
+    std::uniform_real_distribution<float> f_dist(-1, 1);
+
+    std::vector<float>   lhs(test_length), rhs(test_length);
+    std::vector<uint8_t> rhs_idx(test_length);
+    std::vector<uint8_t> packed(packed_bytes(bits, test_length));
+
+    constexpr size_t rounds = 100;
+    for (size_t i = 0; i < rounds; ++i) {
+        std::ranges::generate(lhs, [&] noexcept { return f_dist(prng); });
+        std::ranges::generate(rhs_idx, [&] noexcept { return prng() & ((1u << bits) - 1); });
+        std::ranges::transform(rhs_idx.begin(), rhs_idx.end(), rhs.begin(),
+                               [&](const uint8_t idx) noexcept { return codebook[idx]; });
+        for (size_t j = 0; j < 32; j++) {
+            const size_t           trunc_length = test_length - j;
+            std::span<const float> trunc_lhs(lhs.data() + j, trunc_length);
+            std::span<uint8_t>     trunc_packed(packed.data(), packed_bytes(bits, trunc_length));
+            bit_pack_reference_output(rhs_idx.data() + j, trunc_packed.data(), bits, trunc_length);
+            const float real_dot = dot_product(lhs.data() + j, rhs.data() + j, trunc_length);
+            ASSERT_NO_FATAL_FAILURE(
+                check_f32_q_dot_product_eq(accels, trunc_lhs, trunc_packed, bits, trunc_length, real_dot));
+        }
+    }
+}
+
+void verify_eden_q_q_dot_product_no_lane_confusion(std::span<const IAccelerated*> accels, const uint8_t bits,
+                                                   const size_t test_length) {
+    CHECK(bits >= 1 && bits <= 4);
+    const auto codebook = codebooks::eden_bf16_codebook(bits);
+
+    std::vector<uint8_t> lhs_idx(test_length), rhs_idx(test_length);
+    const uint8_t        highest_centroid_value_idx = (1u << bits) - 1;
+    const uint8_t        lowest_centroid_value_idx = highest_centroid_value_idx / 2;
+    std::ranges::fill(lhs_idx, lowest_centroid_value_idx);
+    std::ranges::fill(rhs_idx, lowest_centroid_value_idx);
+    const size_t         packed_size = packed_bytes(bits, test_length);
+    std::vector<uint8_t> packed_lhs(packed_size), packed_rhs(packed_size);
+
+    const float c_lo = codebook[lowest_centroid_value_idx];
+    const float c_hi = codebook[highest_centroid_value_idx];
+    const float c_lo_sq = c_lo * c_lo;
+    const float c_hi_sq = c_hi * c_hi;
+    for (size_t i = 0; i < test_length; ++i) {
+        lhs_idx[i] = highest_centroid_value_idx;
+        rhs_idx[i] = highest_centroid_value_idx;
+
+        bit_pack_reference_output(lhs_idx.data(), packed_lhs.data(), bits, test_length);
+        bit_pack_reference_output(rhs_idx.data(), packed_rhs.data(), bits, test_length);
+
+        const float expected_hi_hi = c_lo_sq * static_cast<float>(test_length - 1) + c_hi_sq;
+        ASSERT_NO_FATAL_FAILURE(
+            check_q_q_dot_product_eq(accels, packed_lhs, packed_rhs, bits, test_length, expected_hi_hi));
+        lhs_idx[i] = lowest_centroid_value_idx;
+        bit_pack_reference_output(lhs_idx.data(), packed_lhs.data(), bits, test_length);
+        const float expected_lo_hi = c_lo_sq * static_cast<float>(test_length - 1) + (c_lo * c_hi);
+        ASSERT_NO_FATAL_FAILURE(
+            check_q_q_dot_product_eq(accels, packed_lhs, packed_rhs, bits, test_length, expected_lo_hi));
+        rhs_idx[i] = lowest_centroid_value_idx; // Reset for next position iteration
+    }
+}
+
+void verify_eden_q_q_dot_product(std::span<const IAccelerated*> accels, const uint8_t bits,
+                                 const size_t test_length) {
+    CHECK(bits >= 1 && bits <= 4);
+    CHECK(test_length >= 32); // Due to boundary testing
+    const auto             codebook = codebooks::eden_bf16_codebook(bits);
+    Xoshiro256PlusPlusPrng prng(0x1baaadf00000d);
+
+    std::vector<float>   lhs(test_length), rhs(test_length);
+    std::vector<uint8_t> lhs_idx(test_length), rhs_idx(test_length);
+    const size_t         packed_size = packed_bytes(bits, test_length);
+    std::vector<uint8_t> packed_lhs(packed_size), packed_rhs(packed_size);
+
+    auto make_random_idx = [&] noexcept { return prng() & ((1u << bits) - 1); };
+    auto map_idx_to_centroid = [&](const uint8_t idx) noexcept { return codebook[idx]; };
+
+    constexpr size_t rounds = 100;
+    for (size_t i = 0; i < rounds; ++i) {
+        std::ranges::generate(lhs_idx, make_random_idx);
+        std::ranges::generate(rhs_idx, make_random_idx);
+        std::ranges::transform(lhs_idx.begin(), lhs_idx.end(), lhs.begin(), map_idx_to_centroid);
+        std::ranges::transform(rhs_idx.begin(), rhs_idx.end(), rhs.begin(), map_idx_to_centroid);
+        for (size_t j = 0; j < 32; j++) {
+            const size_t       trunc_length = test_length - j;
+            const size_t       trunc_packed_size = packed_bytes(bits, trunc_length);
+            std::span<uint8_t> trunc_packed_lhs(packed_lhs.data(), trunc_packed_size);
+            std::span<uint8_t> trunc_packed_rhs(packed_rhs.data(), trunc_packed_size);
+            bit_pack_reference_output(lhs_idx.data() + j, trunc_packed_lhs.data(), bits, trunc_length);
+            bit_pack_reference_output(rhs_idx.data() + j, trunc_packed_rhs.data(), bits, trunc_length);
+            const float real_dot = dot_product(lhs.data() + j, rhs.data() + j, trunc_length);
+            ASSERT_NO_FATAL_FAILURE(
+                check_q_q_dot_product_eq(accels, trunc_packed_lhs, trunc_packed_rhs, bits, trunc_length, real_dot));
+        }
+    }
+}
+
+void verify_eden_centroid_quantization(std::span<const IAccelerated*> accels, const uint8_t bits,
+                                       const size_t test_length) {
+    CHECK(bits >= 1 && bits <= 4);
+    CHECK(test_length >= 32); // Due to boundary testing
+    Xoshiro256PlusPlusPrng prng(0x1baaadf00000d);
+
+    const auto codebook = codebooks::eden_f32_codebook(bits);
+    const auto [min_centroid, max_centroid] = codebooks::eden_f32_codebook_min_max_value(bits);
+    // Stuff a bit of padding on each side for added boundary testing
+    std::uniform_real_distribution value_dist(min_centroid - 0.5f, max_centroid + 0.5f);
+    std::uniform_real_distribution nx_dist(-3.f, 3.f); // Chosen by mental dice throw
+    std::vector<float>             in(test_length);
+    std::vector<uint8_t>           out(test_length);
+    std::vector<uint8_t>           truth(test_length);
+
+    constexpr size_t rounds = 10;
+    for (size_t i = 0; i < rounds; ++i) {
+        // TODO consider a non random sampling-based approach to this so we can better test
+        //  "very close to" -> "even closer to" -> "exactly at" threshold boundary cases.
+        std::ranges::generate(in, [&] noexcept { return value_dist(prng); });
+        const float nx = nx_dist(prng);
+        for (size_t j = 0; j < test_length; ++j) {
+            truth[j] = closest_centroid_index<float>(in[j] * nx, codebook);
+        }
+        for (size_t offset = 0; offset < 32; ++offset) {
+            const size_t trunc_length = test_length - offset;
+            for (const auto* accel : accels) {
+                SCOPED_TRACE(accel->target_info().to_string());
+                ScopedFnTableOverride fn_scope(accel->fn_table());
+
+                std::ranges::fill(out, 0xff);
+                auto out_sub = std::span(out.data() + offset, trunc_length);
+                eden_quantize_centroids(in.data() + offset, out_sub.data(), bits, nx, trunc_length);
+                auto truth_sub = std::span(truth.data() + offset, trunc_length);
+                // If a value ends up exactly on a threshold boundary, both the centroid on
+                // its left and right are technically speaking equally correct. So if the
+                // indexes differ, cross-check with the relative distances.
+                // TODO or should we require rounding in a particular direction?
+                for (size_t k = 0; k < trunc_length; ++k) {
+                    const uint8_t truth_idx = truth_sub[k];
+                    const uint8_t my_idx = out_sub[k];
+                    if (my_idx != truth_idx) {
+                        float truth_dist = std::abs((in[k] * nx) - codebook[truth_idx]);
+                        float my_dist = std::abs((in[k] * nx) - codebook[my_idx]);
+                        ASSERT_THAT(my_dist, FloatEq(truth_dist))
+                            << "my_idx=" << my_idx << ", truth_idx=" << truth_idx << ", at offset=" << offset;
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_F(HwAcceleratedTest, eden_f32_q_dot_product_does_not_have_lane_confusion) {
+    auto accelerators = all_accelerators_to_test();
+    for (uint8_t bits : {1, 2, 3, 4}) {
+        for (ssize_t sz : {2, 8, 32, 128, 512, 2048}) {
+            for (ssize_t boundary : {-1, 0, 1}) {
+                ASSERT_NO_FATAL_FAILURE(
+                    verify_eden_f32_q_dot_product_no_lane_confusion(accelerators, bits, sz + boundary));
+            }
+        }
+    }
+}
+
+TEST_F(HwAcceleratedTest, eden_f32_q_dot_product_impls_match_source_of_truth) {
+    auto accelerators = all_accelerators_to_test();
+    for (uint8_t bits : {1, 2, 3, 4}) {
+        for (size_t sz : {32, 64, 128, 256, 1024, 4096, 8192}) {
+            ASSERT_NO_FATAL_FAILURE(verify_eden_f32_q_dot_product(accelerators, bits, sz));
+        }
+    }
+}
+
+TEST_F(HwAcceleratedTest, eden_q_q_dot_product_does_not_have_lane_confusion) {
+    auto accelerators = all_accelerators_to_test();
+    for (uint8_t bits : {1, 2, 3, 4}) {
+        for (ssize_t sz : {2, 8, 32, 128, 512, 2048}) {
+            for (ssize_t boundary : {-1, 0, 1}) {
+                ASSERT_NO_FATAL_FAILURE(
+                    verify_eden_q_q_dot_product_no_lane_confusion(accelerators, bits, sz + boundary));
+            }
+        }
+    }
+}
+
+TEST_F(HwAcceleratedTest, eden_q_q_dot_product_impls_match_source_of_truth) {
+    auto accelerators = all_accelerators_to_test();
+    for (uint8_t bits : {1, 2, 3, 4}) {
+        for (size_t sz : {32, 64, 128, 256, 1024, 4096, 8192}) {
+            ASSERT_NO_FATAL_FAILURE(verify_eden_q_q_dot_product(accelerators, bits, sz));
+        }
+    }
+}
+
+TEST_F(HwAcceleratedTest, eden_centroid_quantization_matches_source_of_truth) {
+    auto accelerators = all_accelerators_to_test();
+    for (uint8_t bits : {1, 2, 3, 4}) {
+        SCOPED_TRACE(std::format("bits = {}", bits));
+        for (size_t sz : {32, 64, 128, 256, 1024, 4096, 8192}) {
+            SCOPED_TRACE(std::format("input length = {}", sz));
+            ASSERT_NO_FATAL_FAILURE(verify_eden_centroid_quantization(accelerators, bits, sz));
+        }
     }
 }
 

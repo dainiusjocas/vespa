@@ -323,6 +323,7 @@ public class SessionRepository {
                                                             ApplicationId applicationId,
                                                             TimeoutBudget timeoutBudget,
                                                             DeployLogger deployLogger) {
+        validateDirectories(applicationDirectory);
         LocalSession session = createSessionFromApplication(applicationDirectory, applicationId, false, timeoutBudget,
                                             deployLogger, clock.instant());
         tenantApplications.createApplication(applicationId);
@@ -855,6 +856,14 @@ public class SessionRepository {
         return app;
     }
 
+    private static void validateDirectories(File applicationDirectory) {
+        try {
+            FilesApplicationPackage.validateDirectories(applicationDirectory);
+        } catch (IllegalArgumentException e) {
+            throw new InvalidApplicationException(e.getMessage(), e);
+        }
+    }
+
     private void validateFileExtensions(ApplicationId applicationId, Optional<DeployLogger> deployLogger, FilesApplicationPackage app) {
         try {
             app.validateFileExtensions();
@@ -1022,8 +1031,37 @@ public class SessionRepository {
         if (sessionDir.isEmpty()) return;
 
         ApplicationId applicationId = sessionZKClient.readApplicationId();
+        addFileReferencesFromApplicationPackage(sessionZKClient, sessionDir.get(), applicationId);
         log.log(Level.FINE, () -> "Creating local session for tenant '" + tenantName + "' with session id " + sessionId);
         createLocalSession(sessionDir.get(), applicationId, sessionId);
+    }
+
+    /**
+     * Adds file references in the session's file registries that can be recreated from the distributed
+     * application package, so that this config server has a copy of them without having to download them
+     * from the config server that the application was deployed to. File references that cannot be recreated
+     * (e.g. blobs and URIs) will still be downloaded on demand.
+     */
+    private void addFileReferencesFromApplicationPackage(SessionZooKeeperClient sessionZKClient, File applicationDir, ApplicationId applicationId) {
+        var fileDirectory = fileDistributionFactory.fileDirectory();
+        java.nio.file.Path appDir = applicationDir.toPath().normalize();
+        try {
+            for (var fileRegistry : sessionZKClient.loadApplicationPackage().getFileRegistries().values()) {
+                for (var entry : fileRegistry.export()) {
+                    if (fileDirectory.getFile(entry.reference).isPresent()) continue;
+
+                    java.nio.file.Path file = appDir.resolve(entry.relativePath).normalize();
+                    if ( ! file.startsWith(appDir) || ! Files.exists(file)) continue;
+
+                    if ( ! fileDirectory.addFileIfMatching(file.toFile(), entry.reference, Optional.of(applicationId)))
+                        log.log(Level.FINE, () -> "Content of " + entry.relativePath + " in application package for session " +
+                                                  sessionZKClient.sessionId() + " does not match " + entry.reference);
+                }
+            }
+        } catch (Exception e) {
+            log.log(Level.INFO, "Failed adding file references from application package for session " +
+                                sessionZKClient.sessionId() + ": " + Exceptions.toMessageString(e));
+        }
     }
 
     private Optional<Long> getActiveSessionId(ApplicationId applicationId) {

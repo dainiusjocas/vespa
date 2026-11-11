@@ -8,8 +8,6 @@ import com.yahoo.config.application.api.ApplicationPackage;
 import com.yahoo.config.application.api.DeployLogger;
 import com.yahoo.config.model.api.ApplicationClusterEndpoint;
 import com.yahoo.config.model.api.ContainerEndpoint;
-import com.yahoo.config.model.api.OnnxModelCost;
-import com.yahoo.config.model.api.OnnxModelOptions;
 import com.yahoo.config.model.api.container.ContainerServiceType;
 import com.yahoo.config.model.deploy.DeployState;
 import com.yahoo.config.model.deploy.TestDeployState;
@@ -2621,7 +2619,7 @@ public class ModelProvisioningTest {
         Set<ContainerEndpoint> endpoints = Arrays.stream(cluster)
                                                  .map(c -> new ContainerEndpoint(c,
                                                                                  ApplicationClusterEndpoint.Scope.zone,
-                                                                                 List.of(c + ".example.com")))
+                                                                                 List.of(c + ".example.invalid")))
                                                  .collect(Collectors.toSet());
         return new DeployState.Builder().endpoints(endpoints);
     }
@@ -2699,20 +2697,11 @@ public class ModelProvisioningTest {
 
         var zone = new Zone(SystemName.PublicCd, Environment.dev, RegionName.defaultName());
 
-        // Triton is enabled only for apps with ONNX models.
-        // Mocking OnnxModelCost since DisabledOnnxModelCost used by default returns no models.
-        var mockModelCost = new OnnxModelCost.DisabledOnnxModelCost() {
-            @Override
-            public Map<String, ModelInfo> models() {
-                return Map.of("modernbert", new ModelInfo("modernbert", 1, 1, OnnxModelOptions.empty()));
-            }
-        };
-
         // What the sidecar containers look like is decided by the sidecar provider, injected e.g. in hosted Vespa.
         var sidecar = SidecarSpec.builder()
                 .id(0)
                 .name("test-sidecar")
-                .image(DockerImage.fromString("example.com/test/sidecar:1.0"))
+                .image(DockerImage.fromString("example.invalid/test/sidecar:1.0"))
                 .minCpu(1)
                 .build();
 
@@ -2732,7 +2721,6 @@ public class ModelProvisioningTest {
             }
         };
         var deployStateBuilder = deployStateWithClusterEndpoints("container1")
-                .onnxModelCost(mockModelCost)
                 .sidecarProvider(provider);
         var model = tester.createModel(zone, services, true, deployStateBuilder);
 
@@ -2776,7 +2764,7 @@ public class ModelProvisioningTest {
                   <content version='1.0' id='content1'>
                     <redundancy>1</redundancy>
                     <documents/>
-                    <nodes count='2' docker-image='example.com/vespa/custom'/>
+                    <nodes count='2' docker-image='example.invalid/vespa/custom'/>
                   </content>
                 </services>
                 """;
@@ -2793,7 +2781,7 @@ public class ModelProvisioningTest {
         // The attribute is still honored in non-public hosted systems
         VespaModel model = tester.createModel(new Zone(SystemName.main, Environment.prod, RegionName.defaultName()),
                                               xml, true, deployStateWithClusterEndpoints("container1"));
-        assertEquals(Optional.of(DockerImage.fromString("example.com/vespa/custom")),
+        assertEquals(Optional.of(DockerImage.fromString("example.invalid/vespa/custom")),
                      model.provisioned().clusters().get(ClusterSpec.Id.from("content1")).dockerImageRepo());
     }
 

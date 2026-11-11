@@ -13,6 +13,12 @@
       "include": "#string-single"
     },
     {
+      "include": "#explanation-block"
+    },
+    {
+      "include": "#explanation-inline"
+    },
+    {
       "include": "#tensor-type"
     },
     {
@@ -170,7 +176,7 @@
           "match": "\\[(\\d+)\\]",
           "captures": {
             "1": {
-              "name": "constant.numeric.vespa"
+              "name": "constant.numeric.integer.vespa"
             }
           }
         },
@@ -389,13 +395,41 @@
               "name": "punctuation.section.parens.begin.vespa"
             }
           },
-          "end": "\\)",
-          "endCaptures": {
-            "0": {
-              "name": "punctuation.section.parens.end.vespa"
-            }
-          },
+          "end": "(?<=\\})",
           "patterns": [
+            {
+              "match": "\\)",
+              "name": "punctuation.section.parens.end.vespa"
+            },
+            {
+              "include": "#comment"
+            },
+            {
+              "name": "meta.block.function-body.vespa",
+              "begin": "\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.block.begin.vespa"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.block.end.vespa"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "#expression-block"
+                },
+                {
+                  "include": "#expression-inline"
+                },
+                {
+                  "include": "#ranking-expression"
+                }
+              ]
+            },
             {
               "match": "[a-zA-Z_]\\w*",
               "name": "variable.parameter.vespa"
@@ -502,7 +536,7 @@
         },
         {
           "name": "keyword.control.indexing.vespa",
-          "match": "\\b(select_input|for_each|default|switch|case|else|if)\\b"
+          "match": "\\b(for_each_field|select_input|for_each|default|switch|case|else|if)\\b"
         },
         {
           "name": "entity.name.function.indexing.vespa",
@@ -688,6 +722,70 @@
           "include": "#ranking-expression"
         }
       ]
+    },
+    "explanation-tag": {
+      "match": "^\\s*(@input)\\b(?:\\s+(query\\(\\s*[a-zA-Z_]\\w*\\s*\\)|[a-zA-Z_]\\w*))?",
+      "captures": {
+        "1": {
+          "name": "storage.type.class.documentation.vespa"
+        },
+        "2": {
+          "name": "variable.parameter.documentation.vespa"
+        }
+      }
+    },
+    "explanation-braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#explanation-tag"
+        },
+        {
+          "include": "#explanation-braces"
+        }
+      ]
+    },
+    "explanation-block": {
+      "name": "meta.block.explanation.vespa",
+      "contentName": "comment.block.documentation.vespa",
+      "begin": "\\b(explanation)\\s*(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.vespa"
+        },
+        "2": {
+          "name": "punctuation.section.block.begin.vespa"
+        }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.section.block.end.vespa"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#explanation-tag"
+        },
+        {
+          "include": "#explanation-braces"
+        }
+      ]
+    },
+    "explanation-inline": {
+      "name": "meta.inline.explanation.vespa",
+      "contentName": "comment.line.documentation.vespa",
+      "begin": "\\b(explanation)\\s*(:)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.vespa"
+        },
+        "2": {
+          "name": "punctuation.separator.vespa"
+        }
+      },
+      "end": "$"
     },
     "feature-list-block": {
       "name": "meta.block.feature-list.vespa",

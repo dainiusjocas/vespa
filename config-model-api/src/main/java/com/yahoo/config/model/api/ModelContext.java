@@ -51,6 +51,9 @@ public interface ModelContext {
     default Optional<File> appDir() { return Optional.empty(); }
     OnnxModelCost onnxModelCost();
 
+    /** Directory where imported machine-learned models can be cached between deployments, if any */
+    default Optional<File> mlModelImportCacheDir() { return Optional.empty(); }
+
     /** The Docker image repo we want to use for images for this deployment (optional, will use default if empty) */
     default Optional<DockerImage> wantedDockerImageRepo() { return Optional.empty(); }
 
@@ -126,22 +129,26 @@ public interface ModelContext {
         @ModelFeatureFlag(owners = {"vekterli"}) default int maxContentNodeMaintenanceOpConcurrency() { return -1; }
         @ModelFeatureFlag(owners = {"glebashnik"}) default FeatureFlag<Boolean> useTritonFlag() { return () -> false; }
         @ModelFeatureFlag(owners = {"glebashnik"}) default FeatureFlag<Boolean> tritonShareOnnxSessionFlag() { return () -> false; }
+        @ModelFeatureFlag(owners = {"glebashnik"}) default FeatureFlag<Boolean> tritonOnnxPoolingFlag() { return () -> false; }
         @ModelFeatureFlag(owners = {"arnej"}) default boolean ignoreConnectivityChecksAtStartup() { return false; }
+        @ModelFeatureFlag(owners = {"arnej"}) default boolean skipConnectivityChecksAtStartup() { return false; }
         @ModelFeatureFlag(owners = {"hmusum"}) default boolean requireExplicitDocprocCluster() { return false; }
         @ModelFeatureFlag(owners = {"hmusum"}) default FeatureFlag<Integer> metricsProxyHeapSizeInMibFlag() { return () -> 0; }
         @ModelFeatureFlag(owners = {"hmusum"}) default OptionalInt metricsProxyAdminNodeHeapSizeInMib() { return OptionalInt.empty(); }
         @ModelFeatureFlag(owners = {"toregge"}) default double searchNodeReservedMemoryFactor() { return 0.0; }
         @ModelFeatureFlag(owners = {"arnej"}) default boolean forceDisableOnnxModelOptimization() { return false; }
         @ModelFeatureFlag(owners = {"hmusum"}) default boolean failWhenConfiguringIndexedMapOfArray() { return true; }
+        @ModelFeatureFlag(owners = {"arnej"}) default String allowStructFieldIndex() { return "disallow"; }
         @ModelFeatureFlag(owners = {"johsol"}, unusedSince = "8.740") default boolean protonLogWarningOnDiskCapacityChange() { return true; }
         @ModelFeatureFlag(owners = {"johsol"}, unusedSince = "8.740") default boolean protonResampleDiskCapacity() { return true; }
         @ModelFeatureFlag(owners = {"johsol", "boeker", "arnej"}, unusedSince = "8.778") default boolean fastMapSearch() { return true; }
-        @ModelFeatureFlag(owners = {"hmusum"}, unusedSince = "8.755") default boolean relaxStrictlyIncreasingClusterStateVersions() { return true; }
+        @ModelFeatureFlag(owners = {"hmusum"}) default boolean requireStrictlyIncreasingClusterStateVersions() { return true; }
         // TODO (@sebasabe): Remove when no loaded config model version reads it; productDiscovery() replaces it
         @ModelFeatureFlag(owners = {"sebasabe"}) default boolean commerceDiscovery() { return false; }
         @ModelFeatureFlag(owners = {"hmusum", "vekterli"}) default boolean enableLandlock() { return false; }
         @ModelFeatureFlag(owners = {"hmusum"}) default boolean enableLegacyFeedHandler() { return true; }
         @ModelFeatureFlag(owners = {"sebasabe"}) default boolean productDiscovery() { return false; }
+        @ModelFeatureFlag(owners = {"hmusum"}) default boolean useMlModelImportCache() { return true; }
     }
 
     /** Warning: As elsewhere in this package, do not make backwards incompatible changes that will break old config models! */
@@ -204,7 +211,7 @@ public interface ModelContext {
 
         default List<X509Certificate> operatorCertificates() { return List.of(); }
 
-        default List<String> tlsCiphersOverride() { return List.of(); }
+        @ModelFeatureFlag(owners = {"andreer"}, unusedSince = "8.790") default List<String> tlsCiphersOverride() { return List.of(); }
 
         List<String> environmentVariables();
 

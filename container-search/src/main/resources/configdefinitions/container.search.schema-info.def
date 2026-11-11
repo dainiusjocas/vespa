@@ -12,9 +12,20 @@ schema[].field[].type string
 schema[].field[].alias[] string
 schema[].field[].attribute bool
 schema[].field[].index bool
-schema[].field[].bitPacked bool
+
+## Not used. TODO: Remove on Vespa 9
+schema[].field[].bitPacked bool default=false
+
+## How a string field is matched, or NONE if this is not a string field
+schema[].field[].matchType enum { NONE, TEXT, WORD, EXACT, GRAM } default=NONE
+
 ## A free text explanation of the content and usage of this field, or empty if none
 schema[].field[].explanation string default=""
+
+## The expression to use in queries to produce an input to match against this field from a value given as "@input",
+## e.g. "embed(myEmbedder, @input)", or empty if none
+schema[].field[].inputExpression string default=""
+
 ## Present (with a single entry) if this field has fast map search, i.e. does 'fast-search-map-field',
 ## either on a map, or on an array of struct with the key and value struct fields given here
 ## The name given to the lookup field in 'fast-search-map-field'
@@ -62,3 +73,7 @@ schema[].rankprofile[].sortFeature[] string
 schema[].rankprofile[].input[].name string
 # The tensor type of an input (query rank feature) accepted by this profile
 schema[].rankprofile[].input[].type string
+# The default value of an input (query rank feature) accepted by this profile, as a tensor literal including its type, or empty if none
+schema[].rankprofile[].input[].defaultValue string default=""
+# A free text explanation of an input (query rank feature) accepted by this profile, or empty if none
+schema[].rankprofile[].input[].explanation string default=""

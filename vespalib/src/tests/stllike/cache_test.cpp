@@ -408,6 +408,65 @@ TEST_F(SlruCacheTest, write_through_updates_correct_segment) {
     EXPECT_FALSE(m.contains(2));
 }
 
+TEST_F(SlruCacheTest, update_of_existing_element_does_not_update_lru_order) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, -1, -1);
+
+    cache.write(1, "a");
+    cache.write(2, "b");
+    cache.write(3, "c");
+    EXPECT_EQ(cache.read(1), "a"); // --> protected
+    EXPECT_EQ(cache.read(2), "b"); // --> protected
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3}, {2, 1}));
+    cache.write(4, "d");
+    cache.write(5, "e");
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {5, 4, 3}, {2, 1}));
+    m[3] = "cc";
+    m[1] = "aa";
+    cache.updated(3); // in probationary; stays at LRU tail
+    cache.updated(1); // in protected; stays at LRU tail
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {5, 4, 3}, {2, 1}));
+    EXPECT_EQ(cache.read(3), "cc"); // --> protected (head)
+    EXPECT_EQ(cache.read(1), "aa"); // protected head
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {5, 4}, {1, 3, 2}));
+}
+
+TEST_F(SlruCacheTest, growing_element_via_update_trims_probationary_segment) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, 300, 0);
+
+    cache.write(1, "a");
+    cache.write(2, "b");
+    cache.write(3, "c");
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2, 1}, {}));
+    ASSERT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 243, 0));
+    m[2] = std::string(50, 'x');
+    cache.updated(2); // Grows, but still within capacity
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2, 1}, {}));
+    ASSERT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 292, 0));
+    m[2] = std::string(100, 'x');
+    cache.updated(2); // Exceeds capacity; LRU tail is evicted
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3, 2}, {}));
+    ASSERT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 261, 0));
+}
+
+TEST_F(SlruCacheTest, growing_element_via_update_trims_protected_segment) {
+    cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, 300, 200);
+
+    cache.write(1, "a");
+    cache.write(2, "b");
+    cache.write(3, "c");
+    EXPECT_EQ(cache.read(1), "a"); // --> protected
+    EXPECT_EQ(cache.read(2), "b"); // --> protected
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {3}, {2, 1}));
+    ASSERT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 81, 162));
+    // 1 is at the protected LRU tail; growing it overflows the protected segment, so
+    // it is itself demoted to the head of the probationary segment.
+    m[1] = std::string(60, 'x');
+    cache.updated(1);
+    ASSERT_NO_FATAL_FAILURE(assert_segment_lru_keys(cache, {1, 3}, {2}));
+    ASSERT_NO_FATAL_FAILURE(assert_segment_size_bytes(cache, 221, 81));
+    EXPECT_EQ(cache.read(1), std::string(60, 'x'));
+}
+
 TEST_F(SlruCacheTest, cache_invalidations_update_correct_segment) {
     cache<CacheParam<P, B, zero<uint32_t>, size<std::string>>> cache(m, -1, -1);
 

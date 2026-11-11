@@ -3,9 +3,11 @@ package com.yahoo.search.schema;
 
 import com.yahoo.container.QrSearchersConfig;
 import com.yahoo.search.config.SchemaInfoConfig;
+import com.yahoo.tensor.Tensor;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Translation between schema info configuration and schema objects.
@@ -27,7 +29,9 @@ class SchemaInfoConfigurer {
             Field.Builder fieldBuilder = new Field.Builder(fieldConfig.name(), fieldConfig.type());
             fieldBuilder.setAttribute(fieldConfig.attribute());
             fieldBuilder.setIndex(fieldConfig.index());
-            fieldBuilder.setBitPacked(fieldConfig.bitPacked());
+            fieldBuilder.setMatchType(Field.MatchType.valueOf(fieldConfig.matchType().name()));
+            if ( ! fieldConfig.inputExpression().isEmpty())
+                fieldBuilder.setInputExpression(fieldConfig.inputExpression());
             if ( ! fieldConfig.explanation().isEmpty())
                 fieldBuilder.setExplanation(fieldConfig.explanation());
             for (var fastMapConfig : fieldConfig.fastMapSearchFields())
@@ -60,7 +64,12 @@ class SchemaInfoConfigurer {
             if (profileConfig.totalKeepRankCount() >= 0)
                 profileBuilder.setTotalKeepRankCount(profileConfig.totalKeepRankCount());
             for (var inputConfig : profileConfig.input())
-                profileBuilder.addInput(inputConfig.name(), RankProfile.InputType.fromSpec(inputConfig.type()));
+                profileBuilder.addInput(new RankProfile.Input(inputConfig.name(),
+                                                              RankProfile.InputType.fromSpec(inputConfig.type()),
+                                                              inputConfig.defaultValue().isEmpty() ? Optional.empty()
+                                                                                                   : Optional.of(Tensor.from(inputConfig.defaultValue())), inputConfig.explanation().isEmpty() ? Optional.empty()
+                                                                                                                                                                                               : Optional.of(inputConfig.explanation())
+                ));
             for (String sortFeature : profileConfig.sortFeature())
                 profileBuilder.addSortFeature(sortFeature);
 

@@ -28,7 +28,7 @@ public interface ImmutableSDField {
 
     boolean doesIndexing();
 
-    boolean doesBitPacking();
+    default boolean isSearchable() { return doesAttributing() || doesIndexing(); }
 
     boolean doesLowerCasing();
 
@@ -79,6 +79,12 @@ public interface ImmutableSDField {
     Map<String, String> getAliasToName();
 
     ScriptExpression getIndexingScript();
+
+    /**
+     * Returns the script annotating the indexed struct fields of this complex field in an indexed search cluster,
+     * or an empty script if there are none.
+     */
+    ScriptExpression getStructFieldIndexingScript();
 
     Matching getMatching();
 

@@ -48,11 +48,6 @@ public class ImmutableImportedSDField implements ImmutableSDField {
     }
 
     @Override
-    public boolean doesBitPacking() {
-        return importedField.targetField().doesBitPacking();
-    }
-
-    @Override
     public boolean doesLowerCasing() {
         return importedField.targetField().doesLowerCasing();
     }
@@ -142,6 +137,12 @@ public class ImmutableImportedSDField implements ImmutableSDField {
     @Override
     public ScriptExpression getIndexingScript() {
         throw createUnsupportedException("indexing");
+    }
+
+    /** Imported fields have no struct field indexes, as they are not indexed in this schema. */
+    @Override
+    public ScriptExpression getStructFieldIndexingScript() {
+        return new ScriptExpression();
     }
 
     @Override

@@ -55,7 +55,7 @@ import java.util.logging.Level;
 /**
  * The schema parser
  *
- * NOTE: When this grammar is changed, also change integration/intellij/src/main/bnf/ai/vespa/intellij/schema/parser/sd.bnf
+ * NOTE: When this grammar is changed, also change integration/schema-language-server/language-server/src/main/ccc/SchemaParser.ccc
  *
  * @author bratseth
  */
@@ -96,6 +96,29 @@ public class SchemaParser {
         try {
             return IndexingOperation.fromStream(input, multiline, linguistics, chunkers, embedders, generators);
         } finally {
+            token.next = null;
+            jj_ntk = -1;
+        }
+    }
+
+    /**
+     * Consumes the body of a function directly from the input stream, up to and including the brace
+     * closing the body, and returns the ranking expression it contains.
+     * This must be called right after the left brace opening the body has been consumed.
+     * For compatibility, the expression may also be wrapped in "expression: ..." or "expression { ... }".
+     */
+    private String functionBody(String functionName) throws ParseException {
+        SimpleCharStream input = (SimpleCharStream)token_source.input_stream;
+        if (token.next != null) {
+            input.backup(token.next.image.length());
+        }
+        try {
+            return Utils.parseFunctionBody(input);
+        }
+        catch (java.io.IOException e) { // FastCharStream signals end of input this way
+            throw new ParseException("Unexpected end of input in the body of function '" + functionName + "'");
+        }
+        finally {
             token.next = null;
             jj_ntk = -1;
         }
@@ -2093,7 +2116,7 @@ void function(ParsedRankProfile profile) :
           [ parameter = identifier()         { func.addParameter(parameter); }
           ( <COMMA> parameter = identifier() { func.addParameter(parameter); } )* ]
       ")"
-      lbrace() expression = expression() (<NL>)* <RBRACE> )
+      (<NL>)* <LBRACE> { expression = functionBody(name); } )
     {
         func.setExpression(expression);
         func.setInline(inline);

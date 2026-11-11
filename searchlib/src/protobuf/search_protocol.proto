@@ -27,6 +27,7 @@ message SearchRequest {
     int32 profile_depth = 18; // new meaning: default ProfilingParams.depth
     Profiling profiling = 19;
     QueryTree query_tree = 20; // to replace blob above
+    TelemetryMetadata telemetry_metadata = 21;
 }
 
 message Profiling {
@@ -53,6 +54,10 @@ message StringProperty {
 message SortField {
     bool ascending = 1;
     string field = 2;
+}
+
+message TelemetryMetadata {
+    map<string, string> trace_context = 1;
 }
 
 message SearchReply {
@@ -104,6 +109,7 @@ message DocsumRequest {
     repeated bytes global_ids = 15;
     repeated string fields = 16;
     QueryTree query_tree = 17; // to replace blob above
+    TelemetryMetadata telemetry_metadata = 18;
 }
 
 message DocsumReply {
@@ -112,6 +118,7 @@ message DocsumReply {
 }
 
 message MonitorRequest {
+    TelemetryMetadata telemetry_metadata = 1;
 }
 
 message MonitorReply {
@@ -324,6 +331,13 @@ message ItemLongWand {
     repeated PureWeightedLong weighted_longs = 5;
 }
 
+message ItemSparseTensorWand {
+    TermItemProperties properties = 1;
+    string query_tensor_name = 2;
+    uint32 target_num_hits = 3;
+    double score_threshold = 4;
+}
+
 // complex intermediates:
 message ItemPhrase {
     TermItemProperties properties = 1;
@@ -422,13 +436,12 @@ message QueryTreeItem {
 
         ItemPhrase item_phrase = 34;
         ItemSameElement item_same_element = 35;
-
         ItemNearestNeighbor item_nearest_neighbor = 36;
         ItemGeoLocationTerm item_geo_location_term = 37;
         ItemPredicateQuery item_predicate_query = 38;
         ItemLabelWrapper item_label_wrapper = 39;
-
         ItemStringRangeTerm item_string_range_term = 40;
+        ItemSparseTensorWand item_sparse_tensor_wand = 41;
 
         // unfinished, only inside QRS: item_multi_term
         // not used anymore: item_any

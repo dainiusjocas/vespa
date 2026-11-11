@@ -60,6 +60,7 @@ type Submission struct {
 	Description string `json:"description,omitempty"`
 	AuthorEmail string `json:"authorEmail,omitempty"`
 	SourceURL   string `json:"sourceUrl,omitempty"`
+	SkipTests   bool   `json:"skipTests,omitempty"`
 }
 
 type LogLinePrepareResponse struct {
@@ -153,7 +154,7 @@ func fetchFromController(deployment DeploymentOptions, path string) error {
 	d := deployment.Target.Deployment()
 	var pkgURL *url.URL
 	switch d.Zone.Environment {
-	case "dev", "perf":
+	case "dev":
 		pkgURL = d.System.JobPackageURL(d)
 	default:
 		pkgURL = d.System.ApplicationPackageURL(d.Application)

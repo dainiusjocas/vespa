@@ -34,6 +34,7 @@ bool GroupingManager::empty() const {
 void GroupingManager::init(const IAttributeContext& attrCtx, const document::DocumentType* documentType) {
     GroupingContext::GroupingList  list;
     GroupingContext::GroupingList& groupingList(_groupingContext.getGroupingList());
+    bool                           enum_optimization = _groupingContext.enum_optimization_enabled();
     for (size_t i = 0; i < groupingList.size(); ++i) {
         Grouping& grouping = *groupingList[i];
         try {
@@ -44,7 +45,7 @@ void GroupingManager::init(const IAttributeContext& attrCtx, const document::Doc
 
                 if (en.inherits(AttributeNode::classId)) {
                     auto& an = static_cast<AttributeNode&>(en);
-                    an.enableEnumOptimization(true);
+                    an.enableEnumOptimization(enum_optimization);
                 }
             }
             aggregation::NonAttribute2DocumentAccessor nonAttributes2DocumentAccess(attrCtx);
@@ -52,8 +53,7 @@ void GroupingManager::init(const IAttributeContext& attrCtx, const document::Doc
             grouping.configureStaticStuff(stuff);
             list.push_back(groupingList[i]);
         } catch (const std::exception& e) {
-            Issue::report("Could not locate attribute for grouping number %zd : %s. Ignoring this grouping.", i,
-                          e.what());
+            Issue::report("Could not set up grouping number %zd : %s. Ignoring this grouping.", i, e.what());
         }
     }
     std::swap(list, groupingList);

@@ -1,5 +1,7 @@
 # Copyright Vespa.ai. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
 vespa_add_library(searchcore_attribute STATIC
+    INSTALL lib64
+    OUTPUT_NAME vespa_searchcore_attribute
     SOURCES
     address_space_usage_stats.cpp
     attribute_aspect_delayer.cpp
@@ -32,7 +34,6 @@ vespa_add_library(searchcore_attribute STATIC
     attributemanager.cpp
     attributes_initializer_base.cpp
     attributesconfigscout.cpp
-    document_field_extractor.cpp
     document_field_populator.cpp
     document_field_retriever.cpp
     filter_attribute_manager.cpp

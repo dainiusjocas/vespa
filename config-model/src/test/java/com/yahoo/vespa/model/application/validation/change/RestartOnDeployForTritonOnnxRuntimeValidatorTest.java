@@ -4,8 +4,6 @@ package com.yahoo.vespa.model.application.validation.change;
 import ai.vespa.llm.clients.TritonConfig;
 import com.yahoo.config.model.api.ConfigChangeAction;
 import com.yahoo.config.model.api.ConfigChangeRestartAction.ConfigChange;
-import com.yahoo.config.model.api.OnnxModelCost;
-import com.yahoo.config.model.api.OnnxModelOptions;
 import com.yahoo.config.model.deploy.DeployState;
 import com.yahoo.config.model.deploy.TestProperties;
 import com.yahoo.config.provision.Environment;
@@ -18,7 +16,6 @@ import com.yahoo.vespa.model.test.utils.VespaModelCreatorWithMockPkg;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -29,45 +26,58 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public class RestartOnDeployForTritonOnnxRuntimeValidatorTest {
 
+    // An ONNX embedder, so that the cluster uses Triton when the flag is on.
+    private static final String EMBEDDER = """
+        <component id='modernbert' type='hugging-face-embedder'>
+          <transformer-model url='https://example.invalid/model.onnx'/>
+          <tokenizer-model url='https://example.invalid/tokenizer.json'/>
+        </component>
+        """;
+
     private static final String SERVICES_XML_WITH_ONE_CLUSTER = """
         <services version='1.0'>
           <container id='cluster1' version='1.0'>
+            %s
           </container>
         </services>
-        """;
+        """.formatted(EMBEDDER);
 
     // Clusters must have different ports
     private static final String SERVICES_XML_TWO_CLUSTERS = """
         <services version='1.0'>
           <container id='cluster1' version='1.0'>
+            %s
             <http>
               <server id='server1' port='8080'/>
             </http>
           </container>
           <container id='other-cluster' version='1.0'>
+            %s
             <http>
               <server id='server2' port='8081'/>
             </http>
           </container>
         </services>
-        """;
+        """.formatted(EMBEDDER, EMBEDDER);
 
     private static final String SERVICES_XML_OTHER_CLUSTER = """
         <services version='1.0'>
           <container id='other-cluster' version='1.0'>
+            %s
           </container>
         </services>
-        """;
+        """.formatted(EMBEDDER);
 
     private static final String SERVICES_XML_WITH_TRITON_CONFIG = """
         <services version='1.0'>
           <container id='cluster1' version='1.0'>
+            %s
             <config name='ai.vespa.llm.clients.triton'>
               <timeout>30000</timeout>
             </config>
           </container>
         </services>
-        """;
+        """.formatted(EMBEDDER);
 
     @Test
     void restart_when_triton_runtime_enabled() {
@@ -129,6 +139,24 @@ public class RestartOnDeployForTritonOnnxRuntimeValidatorTest {
         assertTrue(tritonConfig(createModel(SERVICES_XML_WITH_ONE_CLUSTER, true, true)).shareOnnxSessionBetweenInstances());
     }
 
+    // A feature flag decides pooling. The model writes it to the Triton config of the runtime component.
+    @Test
+    void pooling_feature_flag_is_written_to_triton_config() {
+        assertFalse(tritonConfig(createModel(SERVICES_XML_WITH_ONE_CLUSTER, true, false, false)).onnxPooling());
+        assertTrue(tritonConfig(createModel(SERVICES_XML_WITH_ONE_CLUSTER, true, false, true)).onnxPooling());
+    }
+
+    @Test
+    void restart_when_triton_pooling_changes() {
+        var previous = createModel(SERVICES_XML_WITH_ONE_CLUSTER, true, false, false);
+        var next = createModel(SERVICES_XML_WITH_ONE_CLUSTER, true, false, true);
+        var result = validateModel(previous, next);
+
+        assertEquals(1, result.size());
+        assertTrue(result.get(0).getMessage().contains("onnxPooling"));
+        assertEquals(ConfigChangeAction.Type.RESTART, result.get(0).getType());
+    }
+
     // Pins the restart marker on the session sharing field, which the feature flag flips.
     @Test
     void restart_when_triton_session_sharing_changes() {
@@ -176,7 +204,7 @@ public class RestartOnDeployForTritonOnnxRuntimeValidatorTest {
         return ValidationTester.validateChanges(
                 new RestartOnDeployForTritonOnnxRuntimeValidator(),
                 next,
-                deployStateBuilder(false, false)
+                deployStateBuilder(false, false, false)
                         .properties(new TestProperties().setHostedVespa(true))
                         .previousModel(current)
                         .build());
@@ -187,7 +215,11 @@ public class RestartOnDeployForTritonOnnxRuntimeValidatorTest {
     }
 
     private static VespaModel createModel(String servicesXml, boolean useTriton, boolean shareSession) {
-        var builder = deployStateBuilder(useTriton, shareSession);
+        return createModel(servicesXml, useTriton, shareSession, false);
+    }
+
+    private static VespaModel createModel(String servicesXml, boolean useTriton, boolean shareSession, boolean pooling) {
+        var builder = deployStateBuilder(useTriton, shareSession, pooling);
         return new VespaModelCreatorWithMockPkg(null, servicesXml).create(builder);
     }
 
@@ -196,18 +228,12 @@ public class RestartOnDeployForTritonOnnxRuntimeValidatorTest {
         return model.getConfig(TritonConfig.class, "cluster1/component/ai.vespa.triton.TritonOnnxRuntime");
     }
 
-    private static DeployState.Builder deployStateBuilder(boolean useTriton, boolean shareSession) {
+    private static DeployState.Builder deployStateBuilder(boolean useTriton, boolean shareSession, boolean pooling) {
         var deployStateBuilder = new DeployState.Builder().properties(
-                new TestProperties().setUseTriton(useTriton).setTritonShareOnnxSession(shareSession));
+                new TestProperties().setUseTriton(useTriton).setTritonShareOnnxSession(shareSession)
+                                    .setTritonOnnxPooling(pooling));
 
         if (useTriton) {
-            var mockModelCost = new OnnxModelCost.DisabledOnnxModelCost() {
-                @Override
-                public Map<String, ModelInfo> models() {
-                    return Map.of("modernbert", new ModelInfo("modernbert", 1, 1, OnnxModelOptions.empty()));
-                }
-            };
-            deployStateBuilder.onnxModelCost(mockModelCost);
             deployStateBuilder.zone(new Zone(SystemName.PublicCd, Environment.dev, RegionName.defaultName()));
             deployStateBuilder.sidecarProvider((clusterId, minNodeResources, needTriton) -> List.of());
         }

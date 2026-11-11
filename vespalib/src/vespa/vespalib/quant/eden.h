@@ -159,11 +159,9 @@ public:
      *  - query.size() == dimensions()
      *  - quant_vec.size() == quantized_size()
      *
-     * TODO with a vectorized "just in time" bit unpacking that doesn't need a temporary
-     *  buffer we could make this const...
      */
     [[nodiscard]] float pre_rotated_query_dot_product(std::span<const float>   query,
-                                                      std::span<const uint8_t> quant_vec) noexcept;
+                                                      std::span<const uint8_t> quant_vec) const noexcept;
 
     /*
      * Computes the dot product between two quantized vectors that were both quantized
@@ -177,12 +175,9 @@ public:
      * Preconditions:
      *  - lhs.size() == quantized_size()
      *  - rhs.size() == quantized_size()
-     *
-     * TODO with a vectorized "just in time" bit unpacking that doesn't need a temporary
-     *  buffer we could make this const...
      */
     [[nodiscard]] float quantized_lhs_rhs_dot_product(std::span<const uint8_t> lhs,
-                                                      std::span<const uint8_t> rhs) noexcept;
+                                                      std::span<const uint8_t> rhs) const noexcept;
 
     /*
      * Computes the squared Euclidean distance between a quantized vector and a

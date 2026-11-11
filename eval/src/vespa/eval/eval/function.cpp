@@ -7,6 +7,7 @@
 #include "call_nodes.h"
 #include "delete_node.h"
 #include "operator_nodes.h"
+#include "string_stuff.h"
 #include "tensor_nodes.h"
 
 #include <vespa/check_require.h>
@@ -43,6 +44,8 @@ private:
     std::map<std::string, size_t> _params;
 
 protected:
+    bool _has_duplicates = false;
+
     size_t lookup(const std::string& token) const {
         auto result = _params.find(token);
         return (result == _params.end()) ? UNDEF : result->second;
@@ -58,6 +61,7 @@ protected:
 
 public:
     static const size_t UNDEF = -1;
+    bool has_duplicates() const { return _has_duplicates; }
     virtual bool implicit() const = 0;
     virtual size_t resolve(const std::string& token) const = 0;
     std::vector<std::string> extract() const {
@@ -74,7 +78,9 @@ public:
 struct ExplicitParams : Params {
     explicit ExplicitParams(const std::vector<std::string>& params_in) {
         for (const auto& param : params_in) {
-            CHECK(lookup(param) == UNDEF);
+            if (lookup(param) != UNDEF) {
+                _has_duplicates = true;
+            }
             lookup_add(param);
         }
     }
@@ -455,7 +461,7 @@ std::string get_ident(ParseContext& ctx, bool allow_empty) {
     return ident;
 }
 
-size_t get_size_t(ParseContext& ctx) {
+std::string get_number(ParseContext& ctx) {
     ctx.skip_spaces();
     std::string num;
     for (; std::isdigit(static_cast<unsigned char>(ctx.get())); ctx.next()) {
@@ -464,7 +470,7 @@ size_t get_size_t(ParseContext& ctx) {
     if (num.empty()) {
         ctx.fail("expected number");
     }
-    return atoi(num.c_str());
+    return num;
 }
 
 bool is_label_end(char c) {
@@ -659,11 +665,12 @@ TensorSpec::Address get_tensor_address(ParseContext& ctx, const ValueType& type)
             if (dim.is_mapped()) {
                 addr.emplace(dim_name, get_label(ctx));
             } else {
-                size_t idx = get_size_t(ctx);
+                std::string num = get_number(ctx);
+                size_t      idx = as_number(num);
                 if (idx < dim.size) {
                     addr.emplace(dim_name, idx);
                 } else {
-                    ctx.fail(make_string("dimension index too large: %zu", idx));
+                    ctx.fail(make_string("dimension index too large: %s", num.c_str()));
                 }
             }
         } else {
@@ -1039,6 +1046,9 @@ void parse_expression(ParseContext& ctx) {
 
 auto parse_function(const Params& params, std::string_view expression, const SymbolExtractor* symbol_extractor) {
     ParseContext ctx(params, expression.data(), expression.size(), symbol_extractor);
+    if (params.has_duplicates()) {
+        ctx.fail("duplicate parameter names");
+    }
     parse_expression(ctx);
     if (ctx.failed() && params.implicit()) {
         return Function::create(ctx.get_result(), std::vector<std::string>());

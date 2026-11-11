@@ -86,6 +86,7 @@ import com.yahoo.vespa.model.container.component.Component;
 import com.yahoo.vespa.model.container.component.ConnectionLogComponent;
 import com.yahoo.vespa.model.container.component.FileStatusHandlerComponent;
 import com.yahoo.vespa.model.container.component.Handler;
+import com.yahoo.vespa.model.container.component.OnnxEmbedder;
 import com.yahoo.vespa.model.container.component.SignificanceModelRegistry;
 import com.yahoo.vespa.model.container.component.SimpleComponent;
 import com.yahoo.vespa.model.container.component.SystemBindingPattern;
@@ -220,6 +221,7 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
         addSearch(deployState, spec, cluster, context);
         addDocproc(deployState, spec, cluster);
         addDocumentApi(deployState, spec, cluster, context);  // NOTE: Must be done after addSearch
+        addSkills(deployState, spec, cluster); // NOTE: Must be done after addSearch
         addDefaultThreadpool(deployState, spec, cluster);
 
         cluster.addDefaultHandlersExceptStatus();
@@ -229,6 +231,9 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
         addClients(deployState, spec, cluster);
         addHttp(deployState, spec, cluster, context);
 
+        // Decided before addNodes, which provisions the Triton sidecar, and before addModelEvaluationRuntime,
+        // which chooses between the embedded ONNX runtime and TritonOnnxRuntime.
+        cluster.setUsesTriton(shouldUseTriton(cluster, spec, context));
         addNodes(cluster, spec, context);
 
         addModelEvaluationRuntime(deployState, cluster);
@@ -248,11 +253,12 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
         addParameterStoreValidationHandler(cluster, deployState);
     }
 
-    private boolean shouldUseTriton(ApplicationContainerCluster cluster, DeployState deployState) {
+    private boolean shouldUseTriton(ApplicationContainerCluster cluster, Element spec, ConfigModelContext context) {
+        var deployState = context.getDeployState();
         // The Triton runtime requires a sidecar provider, injected e.g. in hosted Vespa.
         if (deployState.getSidecarProvider().isEmpty()) return false;
         var isPublicCloud = deployState.zone().system().isPublicCloudLike();
-        var hasOnnxModels =  !cluster.onnxModelCostCalculator().models().isEmpty();
+        var hasOnnxModels = hasOnnxModels(cluster, spec, context);
         var useTritonFeatureFlagValue = deployState.featureFlags()
                                                    .useTritonFlag()
                                                    .withClusterType(ClusterSpec.Type.container)
@@ -261,10 +267,32 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
         return useTritonFeatureFlagValue && isPublicCloud && hasOnnxModels;
     }
 
+    /**
+     * Whether the cluster runs ONNX models for embedders, model-evaluation or global-phase ranking.
+     * Model-evaluation and global-phase ranking register their models only after the nodes are built,
+     * so those are found in the rank profiles instead.
+     */
+    private static boolean hasOnnxModels(ApplicationContainerCluster cluster, Element spec, ConfigModelContext context) {
+        if (cluster.getAllComponents().stream().anyMatch(OnnxEmbedder.class::isInstance)) return true;
+        if (XML.getChild(spec, "model-evaluation") != null && context.vespaModel() != null
+            && ! context.vespaModel().rankProfileList().getOnnxModels().asMap().isEmpty()) return true;
+        return cluster.getSearch() != null && hasGlobalPhaseOnnxModels(context.getDeployState());
+    }
+
+    /** Whether any schema with a global-phase rank profile has ONNX models. */
+    private static boolean hasGlobalPhaseOnnxModels(DeployState deployState) {
+        for (var schema : deployState.getSchemas()) {
+            var rankProfiles = deployState.rankProfileRegistry().rankProfilesOf(schema);
+            if (rankProfiles.stream().noneMatch(profile -> profile.getGlobalPhase() != null)) continue;
+            if (rankProfiles.stream().anyMatch(profile -> ! profile.onnxModels().isEmpty())) return true;
+        }
+        return false;
+    }
+
     private List<SidecarSpec> getSidecars(ApplicationContainerCluster cluster, DeployState deployState, NodesSpecification nodesSpecification) {
         if (deployState.getSidecarProvider().isEmpty()) return List.of();
 
-        var neededSidecars = shouldUseTriton(cluster, deployState) ? Set.of(SidecarProvider.TRITON_SIDECAR_NAME) : Set.<String>of();
+        var neededSidecars = cluster.usesTriton() ? Set.of(SidecarProvider.TRITON_SIDECAR_NAME) : Set.<String>of();
         var sidecars = deployState.getSidecarProvider().get()
                 .getSidecars(deployState.getProperties().applicationId(),
                              deployState.getVespaVersion(),
@@ -687,7 +715,6 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
         // If the deployment contains certificate/private key reference, setup TLS port
         var builder = HostedSslConnectorFactory.builder(serverName, getMtlsDataplanePort(state, cluster))
                 .proxyProtocol(state.zone().cloud().useProxyProtocol() || enableTokenSupport(state, cluster))
-                .tlsCiphersOverride(state.getProperties().tlsCiphersOverride())
                 .endpointConnectionTtl(state.getProperties().endpointConnectionTtl())
                 .requestPrefixForLoggingContent(state.getProperties().requestPrefixForLoggingContent())
                 .httpComplianceViolations(state.getProperties().jdiscHttpComplianceViolations());
@@ -981,7 +1008,7 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
         cluster.addPlatformBundle(ContainerModelEvaluation.MODEL_INTEGRATION_BUNDLE_FILE);
         cluster.addPlatformBundle(ContainerModelEvaluation.ONNXRUNTIME_BUNDLE_FILE);
         /* The ONNX runtime is always available for injection to any component */
-        if (shouldUseTriton(cluster, deployState)) {
+        if (cluster.usesTriton()) {
             cluster.addSimpleComponent(
                     ContainerModelEvaluation.TRITON_ONNX_RUNTIME_CLASS, null, ContainerModelEvaluation.INTEGRATION_BUNDLE_NAME);
         } else {
@@ -1362,6 +1389,24 @@ public class ContainerModelBuilder extends ConfigModelBuilder<ContainerModel> {
 
         // Add as child to SearchHandler to get the correct 'chains' config.
         searchHandler.addComponent(Component.fromClassAndBundle(SearchHandler.EXECUTION_FACTORY, PlatformBundles.SEARCH_AND_DOCPROC_BUNDLE));
+    }
+
+    /** Adds the schemas skill if <skills> enables it, and the handler serving it where search is. */
+    private void addSkills(DeployState deployState, Element spec, ApplicationContainerCluster cluster) {
+        Element skills = XML.getChild(spec, "skills");
+        if (skills == null || XML.getChild(skills, "schemas") == null) return;
+        if (cluster.getSearch() == null)
+            throw new IllegalArgumentException("The 'schemas' skill requires search, but container cluster '" +
+                                               cluster.getName() + "' has no <search>");
+
+        var skillHandler = new SkillHandler(cluster);
+        if (skillHandler.getServerBindings().isEmpty()) {
+            deployState.getDeployLogger().logApplicationPackage(WARNING, "The 'schemas' skill in container cluster '" +
+                                                                         cluster.getName() + "' is not served, as search has no bindings");
+            return;
+        }
+        cluster.addComponent(skillHandler);
+        cluster.addComponent(new Component<>(new ComponentModel(SkillHandler.SCHEMA_SKILL_SPEC, null)));
     }
 
     private List<BindingPattern> serverBindings(DeployState deployState, ConfigModelContext context, ApplicationContainerCluster cluster, Element searchElement, Collection<BindingPattern> defaultBindings) {

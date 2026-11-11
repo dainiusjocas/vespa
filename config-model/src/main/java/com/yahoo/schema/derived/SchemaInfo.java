@@ -12,7 +12,9 @@ import com.yahoo.document.WeightedSetDataType;
 import com.yahoo.document.annotation.AnnotationReferenceDataType;
 import com.yahoo.documentmodel.NewDocumentReferenceDataType;
 import com.yahoo.schema.document.Attribute;
+import com.yahoo.schema.document.ComplexIndexFieldUtils;
 import com.yahoo.schema.document.FieldSet;
+import com.yahoo.schema.document.GeoPos;
 import com.yahoo.schema.document.ImmutableSDField;
 import com.yahoo.search.config.SchemaInfoConfig;
 import com.yahoo.schema.Index;
@@ -20,10 +22,16 @@ import com.yahoo.schema.RankProfile;
 import com.yahoo.schema.RankProfileRegistry;
 import com.yahoo.schema.Schema;
 import com.yahoo.searchlib.rankingexpression.Reference;
+import com.yahoo.vespa.indexinglanguage.ExpressionVisitor;
+import com.yahoo.vespa.indexinglanguage.expressions.EmbedExpression;
+import com.yahoo.vespa.indexinglanguage.expressions.Expression;
+import com.yahoo.vespa.indexinglanguage.expressions.OutputExpression;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -108,21 +116,60 @@ public final class SchemaInfo extends Derived {
     private void addFieldsConfig(SchemaInfoConfig.Schema.Builder schemaBuilder) {
         // Extra fields which are attributes are also added to the document type, so they are listed twice
         Set<String> added = new HashSet<>();
+        Map<String, String> inputExpressions = inputExpressions();
         for (var field : schema.allFieldsList()) {
             if ( ! added.add(field.getName())) continue;
-            addFieldConfig(field, schemaBuilder);
+            addFieldConfig(field, field.doesAttributing(), Optional.ofNullable(inputExpressions.get(field.getName())), schemaBuilder);
+            addStructFieldsConfig(field, added, schemaBuilder);
+            if (field.isImportedField()) continue;
             for (var index : field.getIndices().values()) {
                 if ( ! index.getName().equals(field.getName())) // additional index
-                    addFieldConfig(index, field.getDataType(), schemaBuilder);
+                    addFieldConfig(index, field, schemaBuilder);
             }
             for (var attribute : field.getAttributes().values()) {
                 if ( ! attribute.getName().equals(field.getName())) // additional attribute
-                    addFieldConfig(attribute, field.getDataType(), schemaBuilder);
+                    addFieldConfig(attribute, field, schemaBuilder);
             }
         }
     }
 
-    private void addFieldConfig(ImmutableSDField field, SchemaInfoConfig.Schema.Builder schemaBuilder) {
+    /**
+     * Returns the expression to use in queries to produce an input to match against each field which receives
+     * the output of an embed expression, e.g. "embed(myEmbedder, @input)".
+     * If a field receives output from multiple embed expressions, the first one is used.
+     */
+    private Map<String, String> inputExpressions() {
+        Map<String, String> inputExpressions = new HashMap<>();
+        for (var field : schema.allFieldsList()) {
+        if (field.isImportedField()) continue;
+            var visitor = new EmbedderVisitor();
+            visitor.visit(field.getIndexingScript());
+            if (visitor.inputExpression == null) continue;
+            for (var outputField : visitor.outputFields)
+                inputExpressions.putIfAbsent(outputField, visitor.inputExpression);
+        }
+        return inputExpressions;
+    }
+
+    /** Adds the struct fields of the given field, recursively, by their full name, e.g. "myStruct.myField". */
+    private void addStructFieldsConfig(ImmutableSDField field, Set<String> added, SchemaInfoConfig.Schema.Builder schemaBuilder) {
+        if ( ! field.usesStructOrMap()) return;
+        if (GeoPos.isAnyPos(field.getDataType())) return;
+        for (var structField : field.getStructFields()) {
+            if ( ! added.add(structField.getName())) continue;
+            // Struct fields may have attributes without doing attributing themselves, if their parent field has indexing
+            addFieldConfig(structField, structField.getAttributes().containsKey(structField.getName()), Optional.empty(), schemaBuilder);
+            addStructFieldsConfig(structField, added, schemaBuilder);
+        }
+    }
+
+    /** Returns whether the field is indexed, including struct field indexes in indexed mode, as in IndexInfo. */
+    private boolean doesIndexing(ImmutableSDField field) {
+        return indexMode == IndexMode.STREAMING ? field.doesIndexing() : ComplexIndexFieldUtils.doesIndexing(field, schema);
+    }
+
+    private void addFieldConfig(ImmutableSDField field, boolean isAttribute, Optional<String> inputExpression,
+                                SchemaInfoConfig.Schema.Builder schemaBuilder) {
         var fieldBuilder = new SchemaInfoConfig.Schema.Field.Builder();
         fieldBuilder.name(field.getName());
         fieldBuilder.type(toTypeSpec(field.getDataType()));
@@ -130,45 +177,63 @@ public final class SchemaInfo extends Derived {
             if (alias.getValue().equals(field.getName()))
                 fieldBuilder.alias(alias.getKey());
         }
-        fieldBuilder.attribute(field.doesAttributing());
-        fieldBuilder.index(field.doesIndexing());
-        fieldBuilder.bitPacked(field.doesBitPacking());
+        boolean isIndex = doesIndexing(field);
+        fieldBuilder.attribute(isAttribute);
+        fieldBuilder.index(isIndex);
+        fieldBuilder.matchType(toMatchType(field, isAttribute || isIndex));
         field.getExplanation().ifPresent(fieldBuilder::explanation);
-        for (var fastMapFields : field.getFastMapSearches()) {
-            fieldBuilder.fastMapSearchFields(new SchemaInfoConfig.Schema.Field.FastMapSearchFields.Builder()
-                                                     .lookupName(fastMapFields.lookupName())
-                                                     .keyField(fastMapFields.keyField())
-                                                     .keyType(toTypeSpec(fastMapFields.keyType()))
-                                                     .valueField(fastMapFields.valueField())
-                                                     .valueType(toTypeSpec(fastMapFields.valueType())));
+        inputExpression.ifPresent(fieldBuilder::inputExpression);
+        // An imported field reports the fast map searches of its parent field, but has no lookup attribute
+        if ( ! field.isImportedField()) {
+            for (var fastMapFields : field.getFastMapSearches()) {
+                fieldBuilder.fastMapSearchFields(new SchemaInfoConfig.Schema.Field.FastMapSearchFields.Builder()
+                                                         .lookupName(fastMapFields.lookupName())
+                                                         .keyField(fastMapFields.keyField())
+                                                         .keyType(toTypeSpec(fastMapFields.keyType()))
+                                                         .valueField(fastMapFields.valueField())
+                                                         .valueType(toTypeSpec(fastMapFields.valueType())));
+            }
         }
         schemaBuilder.field(fieldBuilder);
     }
 
     // TODO: Make fields and indexes 1-1 so that this can be removed
-    private void addFieldConfig(Index index, DataType type, SchemaInfoConfig.Schema.Builder schemaBuilder) {
+    private void addFieldConfig(Index index, ImmutableSDField field, SchemaInfoConfig.Schema.Builder schemaBuilder) {
         var fieldBuilder = new SchemaInfoConfig.Schema.Field.Builder();
         fieldBuilder.name(index.getName());
-        fieldBuilder.type(toTypeSpec(type));
+        fieldBuilder.type(toTypeSpec(field.getDataType()));
         for (Iterator<String> i = index.aliasIterator(); i.hasNext(); )
             fieldBuilder.alias(i.next());
         fieldBuilder.attribute(false);
         fieldBuilder.index(true);
-        fieldBuilder.bitPacked(false);
+        fieldBuilder.matchType(toMatchType(field, true));
         schemaBuilder.field(fieldBuilder);
     }
 
     // TODO: Make fields and attributes 1-1 so that this can be removed
-    private void addFieldConfig(Attribute attribute, DataType type, SchemaInfoConfig.Schema.Builder schemaBuilder) {
+    private void addFieldConfig(Attribute attribute, ImmutableSDField field, SchemaInfoConfig.Schema.Builder schemaBuilder) {
         var fieldBuilder = new SchemaInfoConfig.Schema.Field.Builder();
         fieldBuilder.name(attribute.getName());
-        fieldBuilder.type(toTypeSpec(type));
+        fieldBuilder.type(toTypeSpec(field.getDataType()));
         for (var alias : attribute.getAliases())
             fieldBuilder.alias(alias);
         fieldBuilder.attribute(true);
         fieldBuilder.index(false);
-        fieldBuilder.bitPacked(false);
+        fieldBuilder.matchType(toMatchType(field, true));
         schemaBuilder.field(fieldBuilder);
+    }
+
+    private SchemaInfoConfig.Schema.Field.MatchType.Enum toMatchType(ImmutableSDField field, boolean searchable) {
+        if (!searchable)
+            return SchemaInfoConfig.Schema.Field.MatchType.NONE;
+        if (field.getDataType().getPrimitiveType() != PrimitiveDataType.STRING)
+            return SchemaInfoConfig.Schema.Field.MatchType.NONE;
+        return switch (field.getMatching().getType()) {
+            case TEXT -> SchemaInfoConfig.Schema.Field.MatchType.TEXT;
+            case WORD -> SchemaInfoConfig.Schema.Field.MatchType.WORD;
+            case EXACT -> SchemaInfoConfig.Schema.Field.MatchType.EXACT;
+            case GRAM -> SchemaInfoConfig.Schema.Field.MatchType.GRAM;
+        };
     }
 
     private void addFieldSetConfig(SchemaInfoConfig.Schema.Builder schemaBuilder) {
@@ -225,6 +290,8 @@ public final class SchemaInfo extends Derived {
                 var inputConfig = new SchemaInfoConfig.Schema.Rankprofile.Input.Builder();
                 inputConfig.name(input.getKey().toString());
                 inputConfig.type(input.getValue().type().toString());
+                Optional.ofNullable(rankProfile.inputExplanations().get(input.getKey())).ifPresent(inputConfig::explanation);
+                input.getValue().defaultValue().ifPresent(value -> inputConfig.defaultValue(value.toString(true, true)));
                 rankProfileConfig.input(inputConfig);
             }
             schemaBuilder.rankprofile(rankProfileConfig);
@@ -254,6 +321,22 @@ public final class SchemaInfo extends Derived {
         throw new IllegalArgumentException("Unknown data type " + dataType + " class " + dataType.getClass());
     }
 
+    /** Collects the query input expression corresponding to the first embed expression, and the names of the output fields. */
+    private static class EmbedderVisitor extends ExpressionVisitor {
+
+        String inputExpression = null;
+        final List<String> outputFields = new ArrayList<>();
+
+        @Override
+        protected void doVisit(Expression expression) {
+            if (expression instanceof EmbedExpression embed && inputExpression == null)
+                inputExpression = embed.requestedEmbedderId().map(id -> "embed(" + id + ", @input)").orElse("embed(@input)");
+            else if (expression instanceof OutputExpression output)
+                outputFields.add(output.getFieldName());
+        }
+
+    }
+
     /** A store of a *small* (in memory) amount of rank profile info. */
     public static final class RankProfileInfo {
 
@@ -270,10 +353,12 @@ public final class SchemaInfo extends Derived {
         private final Map<Reference, RankProfile.Input> inputs;
         private final List<String> sortFeatures;
         private final Optional<String> explanation;
+        private final Map<Reference, String> inputExplanations;
 
         public RankProfileInfo(RankProfile profile) {
             this.name = profile.name();
             this.explanation = profile.getExplanation();
+            this.inputExplanations = profile.getInputExplanations();
             this.hasSummaryFeatures =  ! profile.getSummaryFeatures().isEmpty();
             this.hasRankFeatures =  ! profile.getRankFeatures().isEmpty();
             this.inputs = profile.inputs();
@@ -302,6 +387,7 @@ public final class SchemaInfo extends Derived {
         public Map<Reference, RankProfile.Input> inputs() { return inputs; }
         public List<String> sortFeatures() { return sortFeatures; }
         public Optional<String> explanation() { return explanation; }
+        public Map<Reference, String> inputExplanations() { return inputExplanations; }
 
     }
 

@@ -94,13 +94,6 @@ public class PermanentFlags {
             "Takes effect on redeployment",
             INSTANCE_ID);
 
-    public static final UnboundListFlag<String> TLS_CIPHERS_OVERRIDE = defineListFlag(
-            "tls-ciphers-override", List.of(), String.class,
-            "Override TLS ciphers enabled for port 4443 on hosted application containers",
-            "Takes effect on redeployment",
-            INSTANCE_ID
-    );
-
     public static final UnboundDoubleFlag RESOURCE_LIMIT_DISK = defineDoubleFlag(
             "resource-limit-disk", 0.8,
             "Resource limit (between 0.0 and 1.0) for disk usage on content nodes, used by cluster controller for when to block feed",
@@ -160,7 +153,7 @@ public class PermanentFlags {
             TENANT_ID, APPLICATION, INSTANCE_ID);
 
     public static final UnboundStringFlag ADMIN_CLUSTER_NODE_ARCHITECTURE = defineStringFlag(
-            "admin-cluster-node-architecture", "x86_64",
+            "admin-cluster-node-architecture", "any",
             "Architecture to use for node resources. Used when implicitly creating admin clusters " +
             "(logserver and clustercontroller clusters).",
             "Takes effect on next redeployment",
@@ -291,6 +284,14 @@ public class PermanentFlags {
             "Takes effect on next host restart",
             TENANT_ID, APPLICATION, INSTANCE_ID);
 
+    public static final UnboundBooleanFlag SKIP_CONNECTIVITY_CHECKS_AT_STARTUP = defineFeatureFlag(
+            "skip-connectivity-checks-at-startup", false,
+            "Skip connectivity checks in config-sentinel at startup. " +
+                    "Normally the sentinel checks that a sufficient fraction of cluster nodes can reach each other before starting services. " +
+                    "When this flag is set, the checks are not performed at all and services are started immediately.",
+            "Takes effect on next host restart",
+            TENANT_ID, APPLICATION, INSTANCE_ID);
+
     public static final UnboundLongFlag ZOOKEEPER_PRE_ALLOC_SIZE_KIB = defineLongFlag(
             "zookeeper-pre-alloc-size", 65536,
             "Setting for zookeeper.preAllocSize flag in KiB, can be reduced from default value "
@@ -327,6 +328,15 @@ public class PermanentFlags {
             "overriding any optimize-model setting in the application package.",
             "Takes effect at redeployment",
             TENANT_ID, APPLICATION, INSTANCE_ID);
+
+
+    public static final UnboundBooleanFlag REQUIRE_STRICTLY_INCREASING_CLUSTER_STATE_VERSIONS = defineFeatureFlag(
+            "require-strictly-increasing-cluster-state-versions", true,
+            "Whether to require that cluster state versions are strictly " +
+                    "increasing. Single cluster controllers never requires this and are not affected by this flag.",
+            "Takes effect at redeployment",
+            INSTANCE_ID
+    );
 
     private PermanentFlags() {}
 

@@ -111,6 +111,7 @@ type prodDeployOptions struct {
 	description string
 	authorEmail string
 	sourceURL   string
+	skipTests   bool
 	waitSecs    int
 }
 
@@ -168,23 +169,35 @@ $ vespa prod deploy`,
 				Description: options.description,
 				AuthorEmail: options.authorEmail,
 				SourceURL:   options.sourceURL,
+				SkipTests:   options.skipTests,
 			}
 			build, err := vespa.Submit(deployment, submission)
 			if err != nil {
 				return fmt.Errorf("could not deploy application: %w", err)
 			}
 			cli.printSuccess(fmt.Sprintf("Submitted '%s' with build number %s", color.CyanString(pkg.Path), color.CyanString(strconv.FormatInt(build, 10))))
-			log.Printf("See %s for deployment progress\n", color.CyanString(fmt.Sprintf("%s/tenant/%s/application/%s/environment/prod/deployment",
-				deployment.Target.Deployment().System.ConsoleURL, deployment.Target.Deployment().Application.Tenant, deployment.Target.Deployment().Application.Application)))
+			consoleURL := fmt.Sprintf("%s/tenant/%s/application/%s/environment/prod/deployment",
+				deployment.Target.Deployment().System.ConsoleURL, deployment.Target.Deployment().Application.Tenant, deployment.Target.Deployment().Application.Application)
+			log.Printf("See %s for deployment progress\n", color.CyanString(consoleURL))
 			if options.waitSecs > 0 {
 				log.Printf("Waiting up to %s for build pipeline to complete...\n", (time.Duration(options.waitSecs) * time.Second).String())
-				skipped, skipReason, err := vespa.AwaitBuild(target, build, time.Duration(options.waitSecs)*time.Second, cli.Stderr)
+				progress := cli.startDeploymentProgress(fmt.Sprintf("Deploying %s to production · build %d", target.Deployment().Application, build))
+				defer progress.close()
+				var onProgress func(vespa.BuildProgress)
+				if progress != nil {
+					fmt.Fprintln(cli.Stderr)
+					progress.setURL(consoleURL)
+					onProgress = progress.updateBuild
+				}
+				skipped, skipReason, err := vespa.AwaitBuild(target, build, time.Duration(options.waitSecs)*time.Second, cli.Stderr, onProgress)
 				if err != nil {
 					return err
 				}
 				if skipped {
+					progress.finish("Build skipped: " + skipReason)
 					cli.printSuccess(fmt.Sprintf("Build %d skipped: %s", build, skipReason))
 				} else {
+					progress.finish("✓ Deployed to production")
 					cli.printSuccess(fmt.Sprintf("Build %d deployed to production", build))
 				}
 			}
@@ -197,6 +210,7 @@ $ vespa prod deploy`,
 	cmd.Flags().StringVarP(&options.description, "description", "", "", "Description of the source code being deployed. For example a git commit message")
 	cmd.Flags().StringVarP(&options.authorEmail, "author-email", "", "", "Email of the author of the commit being deployed")
 	cmd.Flags().StringVarP(&options.sourceURL, "source-url", "", "", "URL which points to the source code being deployed. For example the build job running the submission")
+	cmd.Flags().BoolVarP(&options.skipTests, "skip-tests", "", false, "Skip system and staging tests when deploying this build to production. Tests still run for platform upgrades")
 	cmd.Flags().IntVarP(&options.waitSecs, "wait", "", 0, "Seconds to wait for the build to complete before returning (0 to return immediately)")
 	return cmd
 }

@@ -5,6 +5,7 @@ import com.yahoo.vespa.config.search.AttributesConfig;
 import com.yahoo.search.Query;
 import com.yahoo.search.config.ClusterConfig;
 import com.yahoo.search.grouping.request.GroupingOperation;
+import com.yahoo.search.schema.SchemaInfo;
 import com.yahoo.search.searchchain.Execution;
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +13,7 @@ import java.util.Collection;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -211,6 +213,12 @@ public class GroupingValidatorTestCase {
         }
     }
 
+    @Test
+    void other_grouping_is_not_validated_in_streaming_mode() {
+        validateGrouping("myCluster", ClusterConfig.IndexMode.Enum.STREAMING, createAttributesConfig(List.of()),
+                         createQuery("all(group(foo) each(output(max(bar))))"));
+    }
+
     private static AttributesConfig setupMismatchingKeySourceAttribute(boolean matchingDataType) {
         AttributesConfig.Builder builder = new AttributesConfig.Builder();
         builder.attribute(new AttributesConfig.Attribute.Builder().name("map.key")
@@ -257,11 +265,16 @@ public class GroupingValidatorTestCase {
     }
 
     private static void validateGrouping(String clusterName, AttributesConfig attributesConfig, Query query) {
+        validateGrouping(clusterName, ClusterConfig.IndexMode.Enum.INDEX, attributesConfig, query);
+    }
+
+    private static void validateGrouping(String clusterName, ClusterConfig.IndexMode.Enum indexMode,
+                                         AttributesConfig attributesConfig, Query query) {
         ClusterConfig.Builder clusterConfig = new ClusterConfig.Builder()
                 .clusterName(clusterName)
-                .indexMode(ClusterConfig.IndexMode.Enum.INDEX);
+                .indexMode(indexMode);
         new Execution(new GroupingValidator(clusterConfig.build(), attributesConfig),
-                      Execution.Context.createContextStub())
+                      Execution.Context.createContextStub(SchemaInfo.empty()))
                 .search(query);
     }
 }

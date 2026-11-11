@@ -8,8 +8,13 @@
 #endif
 
 #include "autovec_unrolled.h"
+#include "centroid.h"
+#include "eden_codebooks.h"
 #include "fn_table.h"
 #include "private_helpers.hpp"
+#include "scalar_block_bit_packing.hpp"
+
+#include <vespa/check_require.h>
 
 #include <cblas.h>
 
@@ -87,6 +92,82 @@ void bitOperation(Operation operation, void* aOrg, const void* bOrg, size_t byte
     }
 }
 
+// We noinline the bit (un-)packing functions to ensure the bitwise dispatching function
+// is just a jump table and doesn't get muddled with a bunch of attempted inlining across
+// different bit widths.
+__attribute__((noinline)) void scalar_block_bit_pack_1(const uint8_t* __restrict__ raw, uint8_t* __restrict__ packed,
+                                                       const size_t sz) noexcept {
+    scalar_block_bit_pack<1>(raw, packed, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_pack_2(const uint8_t* __restrict__ raw, uint8_t* __restrict__ packed,
+                                                       const size_t sz) noexcept {
+    scalar_block_bit_pack<2>(raw, packed, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_pack_3(const uint8_t* __restrict__ raw, uint8_t* __restrict__ packed,
+                                                       const size_t sz) noexcept {
+    scalar_block_bit_pack<3>(raw, packed, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_pack_4(const uint8_t* __restrict__ raw, uint8_t* __restrict__ packed,
+                                                       const size_t sz) noexcept {
+    scalar_block_bit_pack<4>(raw, packed, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_unpack_1(const uint8_t* __restrict__ packed,
+                                                         uint8_t* __restrict__ raw, const size_t sz) noexcept {
+    scalar_block_bit_unpack<1>(packed, raw, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_unpack_2(const uint8_t* __restrict__ packed,
+                                                         uint8_t* __restrict__ raw, const size_t sz) noexcept {
+    scalar_block_bit_unpack<2>(packed, raw, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_unpack_3(const uint8_t* __restrict__ packed,
+                                                         uint8_t* __restrict__ raw, const size_t sz) noexcept {
+    scalar_block_bit_unpack<3>(packed, raw, sz);
+}
+
+__attribute__((noinline)) void scalar_block_bit_unpack_4(const uint8_t* __restrict__ packed,
+                                                         uint8_t* __restrict__ raw, const size_t sz) noexcept {
+    scalar_block_bit_unpack<4>(packed, raw, sz);
+}
+
+template <uint8_t Bits>
+__attribute__((noinline)) float do_eden_f32_q_dot_product(const float* lhs, const uint8_t* packed_rhs,
+                                                          const size_t sz) noexcept {
+    const auto codebook = codebooks::eden_bf16_codebook(Bits);
+    size_t     i = 0;
+    float      dot = 0;
+    with_scalar_unpacked_rhs_bits<Bits>(packed_rhs, sz, [&](const uint8_t* idx, const size_t chunk_sz) noexcept {
+        dot += sum_indexed_unrolled<4, float>(chunk_sz, [&](const size_t j) noexcept {
+            const float c_j = codebook[idx[j]];
+            return lhs[i + j] * c_j;
+        });
+        i += chunk_sz;
+    });
+    return dot;
+}
+
+template <uint8_t Bits>
+__attribute__((noinline)) float do_eden_q_q_dot_product(const uint8_t* packed_lhs, const uint8_t* packed_rhs,
+                                                        const size_t sz) noexcept {
+    const auto codebook = codebooks::eden_bf16_codebook(Bits);
+    float      dot = 0;
+    with_scalar_unpacked_lhs_rhs_bits<Bits>(
+        packed_lhs, packed_rhs, sz,
+        [&](const uint8_t* lhs_idx, const uint8_t* rhs_idx, const size_t chunk_sz) noexcept {
+            dot += sum_indexed_unrolled<4, float>(chunk_sz, [&](const size_t j) noexcept {
+                const float c_l = codebook[lhs_idx[j]];
+                const float c_r = codebook[rhs_idx[j]];
+                return c_l * c_r;
+            });
+        });
+    return dot;
+}
+
 int64_t my_dot_product_i8(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return helper::multiplyAdd(a, b, sz);
 }
@@ -112,6 +193,36 @@ float my_dot_product_f32(const float* a, const float* b, size_t sz) noexcept {
 double my_dot_product_f64(const double* a, const double* b, size_t sz) noexcept {
     return cblas_ddot(sz, a, 1, b, 1);
 }
+float my_eden_f32_q_dot_product(const float* lhs, const uint8_t* packed_rhs, const uint8_t bits,
+                                const size_t sz) noexcept {
+    switch (bits) {
+    case 1:
+        return do_eden_f32_q_dot_product<1>(lhs, packed_rhs, sz);
+    case 2:
+        return do_eden_f32_q_dot_product<2>(lhs, packed_rhs, sz);
+    case 3:
+        return do_eden_f32_q_dot_product<3>(lhs, packed_rhs, sz);
+    case 4:
+        return do_eden_f32_q_dot_product<4>(lhs, packed_rhs, sz);
+    default:
+        abort();
+    }
+}
+float my_eden_q_q_dot_product(const uint8_t* packed_lhs, const uint8_t* packed_rhs, const uint8_t bits,
+                              const size_t sz) noexcept {
+    switch (bits) {
+    case 1:
+        return do_eden_q_q_dot_product<1>(packed_lhs, packed_rhs, sz);
+    case 2:
+        return do_eden_q_q_dot_product<2>(packed_lhs, packed_rhs, sz);
+    case 3:
+        return do_eden_q_q_dot_product<3>(packed_lhs, packed_rhs, sz);
+    case 4:
+        return do_eden_q_q_dot_product<4>(packed_lhs, packed_rhs, sz);
+    default:
+        abort();
+    }
+}
 double my_squared_euclidean_distance_i8(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return helper::squaredEuclideanDistance(a, b, sz);
 }
@@ -136,6 +247,41 @@ size_t my_population_count(const uint64_t* buf, size_t sz) noexcept {
 }
 void my_convert_bfloat16_to_float(const uint16_t* src, float* dest, size_t sz) noexcept {
     helper::convert_bfloat16_to_float(src, dest, sz);
+}
+void my_eden_quantize_centroids(const float* src, uint8_t* dest, const uint8_t bits, const float nx,
+                               const size_t sz) noexcept {
+    const auto selection_codebook = codebooks::eden_f32_codebook(bits);
+    for (size_t i = 0; i < sz; ++i) {
+        dest[i] = closest_centroid_index<float>(src[i] * nx, selection_codebook);
+    }
+}
+void my_pack_bits(const uint8_t* raw, uint8_t* packed, const uint8_t bits, const size_t sz) noexcept {
+    switch (bits) {
+    case 1:
+        return scalar_block_bit_pack_1(raw, packed, sz);
+    case 2:
+        return scalar_block_bit_pack_2(raw, packed, sz);
+    case 3:
+        return scalar_block_bit_pack_3(raw, packed, sz);
+    case 4:
+        return scalar_block_bit_pack_4(raw, packed, sz);
+    default:
+        abort();
+    }
+}
+void my_unpack_bits(const uint8_t* packed, uint8_t* raw, const uint8_t bits, const size_t sz) noexcept {
+    switch (bits) {
+    case 1:
+        return scalar_block_bit_unpack_1(packed, raw, sz);
+    case 2:
+        return scalar_block_bit_unpack_2(packed, raw, sz);
+    case 3:
+        return scalar_block_bit_unpack_3(packed, raw, sz);
+    case 4:
+        return scalar_block_bit_unpack_4(packed, raw, sz);
+    default:
+        abort();
+    }
 }
 void my_or_bit(void* aOrg, const void* bOrg, size_t bytes) noexcept {
     bitOperation<8>([](uint64_t a, uint64_t b) { return a | b; }, aOrg, bOrg, bytes);

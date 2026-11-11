@@ -13,6 +13,7 @@ import com.yahoo.tensor.Tensor;
 import com.yahoo.tensor.TensorType;
 import com.yahoo.text.Text;
 import com.yahoo.language.process.TimeoutException;
+import com.yahoo.yolean.Exceptions;
 import inference.GRPCInferenceServiceGrpc;
 import inference.GrpcService;
 import io.grpc.ManagedChannel;
@@ -96,6 +97,11 @@ public class TritonOnnxClient implements AutoCloseable {
         public final Map<String, TensorType> outputs;
         // Only used by `evaluate` inside the client, thus `private`.
         private final List<GrpcService.ModelMetadataResponse.TensorMetadata> tritonInputs;
+
+        /** For tests of code which only reads the types */
+        ModelMetadata(Map<String, TensorType> inputs, Map<String, TensorType> outputs) {
+            this(inputs, outputs, List.of());
+        }
 
         private ModelMetadata(
                 Map<String, TensorType> inputs,
@@ -221,6 +227,10 @@ public class TritonOnnxClient implements AutoCloseable {
                     return;
                 }
             } catch (TritonException | TimeoutException e) {
+                // Triton rejects a config the same way on every attempt.
+                if (e instanceof TritonException tritonException && isConfigRejection(tritonException)) {
+                    throw tritonException;
+                }
                 lastException = e;
             }
 
@@ -237,6 +247,26 @@ public class TritonOnnxClient implements AutoCloseable {
         var waitMillis = System.currentTimeMillis() - startMillis;
         var exceptionMessage = "Failed loading model " + modelName + " after " + waitMillis + " ms";
         throw new TritonException(exceptionMessage, lastException);
+    }
+
+    /**
+     * Returns whether the error is Triton's ONNX Runtime backend refusing to load a model with a non-zero max batch size,
+     * since an input or output of the model has no dynamic first dimension.
+     * Only Triton's auto-complete reports this error.
+     * TritonOnnxRuntime specifies the inputs and outputs only in model configs with max batch size 0,
+     * so the others need auto-complete.
+     */
+    public static boolean isBatchingRejection(TritonException e) {
+        return Exceptions.toMessageString(e).contains("does not support batching while non-zero max_batch_size");
+    }
+
+    /**
+     * Returns whether the error is Triton refusing to load a model with its config, such as rejecting batching
+     * or inputs and outputs specified in the model config that do not match the model.
+     * Triton reports a model file that is missing or partly written with other errors, which a retry may fix.
+     */
+    public static boolean isConfigRejection(TritonException e) {
+        return Exceptions.toMessageString(e).contains("UNAVAILABLE state: Invalid argument:");
     }
 
     /**

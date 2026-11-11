@@ -71,7 +71,11 @@ public final class IndexingScript extends Derived {
             fastMapSearchFields.add(field.getName());
         }
 
-        if (field.usesStructOrMap() && ! GeoPos.isAnyPos(field)) return; // unsupported
+        if (field.usesStructOrMap() && ! GeoPos.isAnyPos(field)) {
+            if ( ! isStreaming)
+                addExpression(field.getStructFieldIndexingScript());
+            return; // other indexing of struct fields is unsupported
+        }
         if (fieldsSettingLanguage.size() == 1 && fieldsSettingLanguage.get(0).equals(field)) return; // Already added
 
         addExpression(field.getIndexingScript());

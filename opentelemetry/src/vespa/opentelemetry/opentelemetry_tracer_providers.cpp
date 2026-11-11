@@ -2,15 +2,28 @@
 
 #include "opentelemetry_tracer_providers.h"
 
+#include <vespa/config-telemetry.h>
+#include <vespa/defaults.h>
 #include <vespa/vespalib/component/vtag.h>
+#include <vespa/vespalib/net/tls/transport_security_options_reading.h>
 
+#include <opentelemetry/context/propagation/global_propagator.h>
 #include <opentelemetry/exporters/memory/in_memory_span_exporter_factory.h>
 #include <opentelemetry/exporters/ostream/span_exporter_factory.h>
 #include <opentelemetry/exporters/otlp/otlp_grpc_exporter_factory.h>
 #include <opentelemetry/sdk/trace/batch_span_processor_factory.h>
 #include <opentelemetry/sdk/trace/simple_processor_factory.h>
 #include <opentelemetry/sdk/trace/tracer_provider_factory.h>
+#include <opentelemetry/trace/propagation/http_trace_context.h>
 #include <opentelemetry/trace/provider.h>
+
+#include <format>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+
+#include <vespa/log/log.h>
+LOG_SETUP(".opentelemetry.opentelemetry_tracer_providers");
 
 namespace vespa_opentelemetry {
 
@@ -48,6 +61,25 @@ opentelemetry::sdk::resource::Resource OpenTelemetryTracerProviders::make_resour
     return opentelemetry::sdk::resource::Resource::Create(resource_attributes);
 }
 
+opentelemetry::sdk::resource::Resource
+OpenTelemetryTracerProviders::make_resource(const std::string& service_name, TelemetryConfig& telemetry_config) {
+    opentelemetry::sdk::resource::ResourceAttributes resource_attributes;
+    for (const auto& resource : telemetry_config.resourceAttribute) {
+        resource_attributes.SetAttribute(resource.first, resource.second);
+    }
+    resource_attributes.SetAttribute("realservice.name", service_name);
+    resource_attributes.SetAttribute("realservice.version", vespalib::VersionTag);
+    return opentelemetry::sdk::resource::Resource::Create(resource_attributes);
+}
+
+void OpenTelemetryTracerProviders::adjust_otlp_grpc_exporter_options(
+    opentelemetry::exporter::otlp::OtlpGrpcExporterOptions& opts, TelemetryConfig& cfg) {
+    auto          host_name_file_name = vespa::Defaults::underVespaHome(cfg.endpointHostnameFile.c_str());
+    std::ifstream host_name_file(host_name_file_name);
+    std::string   host_name((std::istreambuf_iterator<char>(host_name_file)), std::istreambuf_iterator<char>());
+    opts.endpoint = std::format("https://{}:4317", host_name);
+}
+
 void OpenTelemetryTracerProviders::init_grpc_tracer_provider(
     const opentelemetry::exporter::otlp::OtlpGrpcExporterOptions& otlp_grpc_exporter_options,
     const opentelemetry::sdk::trace::BatchSpanProcessorOptions&   batch_span_processor_options,
@@ -58,6 +90,32 @@ void OpenTelemetryTracerProviders::init_grpc_tracer_provider(
     std::shared_ptr<opentelemetry::trace::TracerProvider> provider =
         opentelemetry::sdk::trace::TracerProviderFactory::Create(std::move(processor), resource);
     opentelemetry::trace::Provider::SetTracerProvider(provider);
+    opentelemetry::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
+        std::make_shared<opentelemetry::trace::propagation::HttpTraceContext>());
+}
+
+void OpenTelemetryTracerProviders::init_grpc_tracer_provider(const std::string& service_name,
+                                                             TelemetryConfig&   telemetry_config) {
+    if (!telemetry_config.enabled) {
+        return;
+    }
+    const char* tls_config_file = getenv(vespa_tls_config_file.c_str());
+    if (tls_config_file == nullptr) {
+        LOG(warning, "environment variable '%s' not set, telemetry is disabled", vespa_tls_config_file.c_str());
+        return;
+    }
+    auto vespa_tls_config = vespalib::net::tls::read_options_from_json_file(tls_config_file);
+    if (!vespa_tls_config) {
+        std::stringstream ss;
+        ss << "bad vespa tls config file " << std::quoted(tls_config_file) << ", telemetry is disabled";
+        LOG(warning, "%s", ss.str().c_str());
+        return;
+    }
+    auto otlp_grpc_exporter_options = setup_otlp_grpc_exporter_options(*vespa_tls_config);
+    adjust_otlp_grpc_exporter_options(otlp_grpc_exporter_options, telemetry_config);
+    auto batch_span_processor_options = setup_batch_span_processor_options(false);
+    auto resource = make_resource(service_name, telemetry_config);
+    init_grpc_tracer_provider(otlp_grpc_exporter_options, batch_span_processor_options, resource);
 }
 
 std::shared_ptr<opentelemetry::exporter::memory::InMemorySpanData>

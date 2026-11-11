@@ -1,6 +1,11 @@
 // Copyright Vespa.ai. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
 package ai.vespa.modelintegration.evaluator;
 
+import ai.onnxruntime.NodeInfo;
+import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtException;
+import ai.onnxruntime.OrtSession;
+import ai.onnxruntime.TensorInfo;
 import onnx.Onnx;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -9,6 +14,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -92,6 +98,48 @@ class OnnxStreamParserTest {
         var float32 = OnnxStreamParser.getOperatorTypes(Path.of("src/test/models/onnx/transformer/dummy_masked_attention_embedder.onnx"));
         assertFalse(float32.contains("DynamicQuantizeLinear"), float32.toString());
         assertTrue(float32.contains("Softmax"), float32.toString());
+    }
+
+    // Triton's ONNX Runtime backend decides batching from the shapes that ONNX Runtime reports, not from the file.
+    // The test therefore checks each model against that rule, applied to the shapes of a real ONNX Runtime session.
+    @Test
+    void finds_batch_dimension_as_onnx_runtime_reports_it(@TempDir Path directory) throws IOException, OrtException {
+        for (var testCase : BatchDimensionTestModels.cases()) {
+            var model = Files.write(directory.resolve(testCase.name() + ".onnx"), testCase.model().toByteArray());
+            assertEquals(testCase.hasDynamicFirstDimension(), onnxRuntimeReportsDynamicFirstDimension(model), testCase.name());
+            assertEquals(testCase.hasDynamicFirstDimension(), OnnxStreamParser.hasDynamicFirstDimension(model), testCase.name());
+        }
+    }
+
+    // ONNX Runtime infers that these models have an output without a dynamic first dimension.
+    // OnnxStreamParser reads only declared shapes, so it reports a dynamic first dimension.
+    // The test documents this limitation and fails if it changes.
+    @Test
+    void misses_outputs_that_onnx_runtime_infers_without_batch_dimension(@TempDir Path directory)
+            throws IOException, OrtException {
+        for (var testCase : BatchDimensionTestModels.casesWhereShapeInferenceRemovesBatchDimension()) {
+            var model = Files.write(directory.resolve(testCase.name() + ".onnx"), testCase.model().toByteArray());
+            assertFalse(onnxRuntimeReportsDynamicFirstDimension(model), testCase.name());
+            assertTrue(OnnxStreamParser.hasDynamicFirstDimension(model), testCase.name());
+        }
+    }
+
+    private static boolean onnxRuntimeReportsDynamicFirstDimension(Path model) throws OrtException {
+        try (var options = new OrtSession.SessionOptions();
+             var session = OrtEnvironment.getEnvironment().createSession(model.toString(), options)) {
+            var shapes = new ArrayList<NodeInfo>(session.getInputInfo().values());
+            shapes.addAll(session.getOutputInfo().values());
+            // Triton's ONNX Runtime backend batches only when every input and output has a dynamic first dimension
+            return shapes.stream().map(info -> ((TensorInfo) info.getInfo()).getShape())
+                    .allMatch(shape -> shape.length > 0 && shape[0] == -1);
+        }
+    }
+
+    @Test
+    void finds_batch_dimension_in_model_files() throws IOException {
+        assertFalse(OnnxStreamParser.hasDynamicFirstDimension(Path.of("src/test/models/onnx/add_float.onnx")));
+        assertFalse(OnnxStreamParser.hasDynamicFirstDimension(Path.of("src/test/models/onnx/catboost/catboost_regressor.onnx")));
+        assertTrue(OnnxStreamParser.hasDynamicFirstDimension(Path.of("src/test/models/onnx/transformer/dummy_transformer.onnx")));
     }
 
     private static byte[] modelWithExternalData(String location) {

@@ -50,6 +50,11 @@ public class FieldSet implements FieldInfo {
         return false;
     }
 
+    @Override
+    public Field.MatchType matchType() {
+        return representativeField().map(Field::matchType).orElse(Field.MatchType.NONE);
+    }
+
     void setSchema(Schema schema) {
         if ( this.schema != null)
             throw new IllegalStateException("Cannot add field set '" + name + "' to schema '" + schema.name() +
@@ -60,7 +65,6 @@ public class FieldSet implements FieldInfo {
     /**
      * Returns the first field in this which is known by the schema, which is used to determine the properties of this.
      * Any inconsistency between the fields will have been warned about on deploy.
-     * Fields may be unknown since field sets may contain struct fields, which are not included in schemas.
      */
     Optional<Field> representativeField() {
         if (schema == null) return Optional.empty();

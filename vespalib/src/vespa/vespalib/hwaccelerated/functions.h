@@ -40,6 +40,18 @@ namespace vespalib::hwaccelerated {
     return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(dot_product_f64)(a, b, sz);
 }
 
+// `lhs` must have been previously rotated into the same frame of reference as the
+// quantized vector `packed_rhs`, or the result will be bogus.
+[[nodiscard]] inline float eden_f32_q_dot_product(const float* lhs, const uint8_t* packed_rhs, const uint8_t bits,
+                                                  size_t sz) noexcept {
+    return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(eden_f32_q_dot_product)(lhs, packed_rhs, bits, sz);
+}
+
+[[nodiscard]] inline float eden_q_q_dot_product(const uint8_t* packed_lhs, const uint8_t* packed_rhs,
+                                                const uint8_t bits, size_t sz) noexcept {
+    return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(eden_q_q_dot_product)(packed_lhs, packed_rhs, bits, sz);
+}
+
 [[nodiscard]] inline double squared_euclidean_distance(const int8_t* a, const int8_t* b, size_t sz) noexcept {
     return dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(squared_euclidean_distance_i8)(a, b, sz);
 }
@@ -70,6 +82,45 @@ namespace vespalib::hwaccelerated {
 
 inline void convert_bfloat16_to_float(const uint16_t* src, float* dest, size_t sz) noexcept {
     dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(convert_bfloat16_to_float)(src, dest, sz);
+}
+
+inline void eden_quantize_centroids(const float* src, uint8_t* dest, uint8_t bits, float nx, size_t sz) noexcept {
+    dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(eden_quantize_centroids)(src, dest, bits, nx, sz);
+}
+
+/*
+ * Computes the number of bytes that `pack(raw, packed, bits, n)` will write into `packed` when
+ * packing `n` u8 elements from `raw`, using `bits` number of bits per element. This number includes
+ * any required padding at the end. All implementations of pack_bits/unpack_bits must adhere to this.
+ */
+[[nodiscard]] constexpr size_t packed_bytes(const uint8_t bits, const size_t n) noexcept {
+    return ((n * bits) / 8) + (((n * bits) % 8) != 0 ? 1 : 0);
+}
+
+/*
+ * Packs `sz` u8 values from `raw` into `packed_bytes(bits, sz)` bytes in the destination `packed` buffer.
+ * The output format must be bitwise identical across implementations and must not change across
+ * Vespa versions (unless format versioning is added to the API).
+ *
+ * Preconditions:
+ *  - `raw` must not contain any values greater than 2**bits - 1.
+ *  - `raw` and `packed` must not alias.
+ *  - `packed` must be valid for at least `packed_bytes(bits, sz)` bytes.
+ */
+inline void pack_bits(const uint8_t* raw, uint8_t* packed, uint8_t bits, size_t sz) noexcept {
+    dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(pack_bits)(raw, packed, bits, sz);
+}
+
+/*
+ * Unpacks `sz` u8 values from `packed` into the destination `raw` buffer.
+ *
+ * Preconditions:
+ *  - `packed` must be valid for at least `packed_bytes(bits, sz)` bytes.
+ *  - `raw` must be able to hold at least `sz` bytes.
+ *  - `packed` and `raw` must not alias.
+ */
+inline void unpack_bits(const uint8_t* packed, uint8_t* raw, uint8_t bits, size_t sz) noexcept {
+    dispatch::VESPA_HWACCEL_DISPATCH_FN_PTR_NAME(unpack_bits)(packed, raw, bits, sz);
 }
 
 inline void or_bit(void* a, const void* b, size_t bytes) noexcept {
