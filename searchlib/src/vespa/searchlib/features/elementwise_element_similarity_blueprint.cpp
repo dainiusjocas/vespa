@@ -3,6 +3,7 @@
 #include "elementwise_element_similarity_blueprint.h"
 
 #include "element_similarity_calculator.h"
+#include "element_similarity_feature.h"
 #include "elementwise_element_similarity_executor.h"
 #include "elementwise_utils.h"
 
@@ -36,10 +37,6 @@ std::string lookup_output_expression(const fef::Properties& props, const fef::Pa
     }
     return props.lookup(ElementwiseUtils::nested_feature_name(element_similarity_feature_base_name, params) + suffix)
         .get(ElementSimilarityCalculator::default_output_expression());
-}
-
-bool is_known_aggregator(const std::string& name) {
-    return (name == "max") || (name == "avg") || (name == "sum");
 }
 
 } // namespace
@@ -77,7 +74,7 @@ bool ElementwiseElementSimilarityBlueprint::setup(const fef::IIndexEnvironment& 
         return fail("could not extract aggregator and expression from config value '%s' (%s)", config.c_str(),
                     error.c_str());
     }
-    if (!is_known_aggregator(aggr_name)) {
+    if (!ElementSimilarityBlueprint::is_known_aggregator(aggr_name)) {
         return fail("unknown aggregator '%s' in config value '%s'", aggr_name.c_str(), config.c_str());
     }
     auto function = Function::parse(ElementSimilarityCalculator::expression_params(), expr);
@@ -100,8 +97,8 @@ bool ElementwiseElementSimilarityBlueprint::setup(const fef::IIndexEnvironment& 
 
 fef::FeatureExecutor& ElementwiseElementSimilarityBlueprint::createExecutor(const fef::IQueryEnvironment& env,
                                                                             vespalib::Stash& stash) const {
-    return stash.create<ElementwiseElementSimilarityExecutor>(env, _field->id(),
-                                                              _compile_token->get().get_function<5>(), *_empty_output);
+    return stash.create<ElementwiseElementSimilarityExecutor>(
+        env, _field->id(), _compile_token->get().get_function<5>(), *_empty_output);
 }
 
 } // namespace search::features

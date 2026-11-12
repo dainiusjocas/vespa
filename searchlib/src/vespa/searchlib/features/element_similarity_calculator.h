@@ -54,6 +54,10 @@ private:
         std::vector<fef::TermFieldHandle> handles;
         std::vector<int>                  weights;
         int                               total_weight = 0;
+
+        QueryTerms();
+        QueryTerms(QueryTerms&&) noexcept;
+        ~QueryTerms();
     };
     static QueryTerms collect_query_terms(const fef::IQueryEnvironment& env, uint32_t field_id);
 

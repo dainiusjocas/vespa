@@ -7,7 +7,6 @@
 #include <vespa/eval/eval/llvm/compile_cache.h>
 #include <vespa/eval/eval/llvm/compiled_function.h>
 #include <vespa/searchlib/fef/featurenamebuilder.h>
-#include <vespa/searchlib/fef/itermdata.h>
 #include <vespa/searchlib/fef/properties.h>
 #include <vespa/vespalib/util/stash.h>
 
@@ -125,7 +124,7 @@ public:
 };
 
 ElementSimilarityExecutor::ElementSimilarityExecutor(const fef::IQueryEnvironment& env, uint32_t field_id,
-                                                     std::vector<OutputSpec>&&     outputs_in)
+                                                     std::vector<OutputSpec>&& outputs_in)
     : _calculator(env, field_id), _outputs(std::move(outputs_in)) {
 }
 ElementSimilarityExecutor::~ElementSimilarityExecutor() = default;
@@ -182,6 +181,10 @@ ElementSimilarityBlueprint::ElementSimilarityBlueprint()
 }
 
 ElementSimilarityBlueprint::~ElementSimilarityBlueprint() = default;
+
+bool ElementSimilarityBlueprint::is_known_aggregator(const std::string& name) {
+    return create_aggregator(name).get() != nullptr;
+}
 
 void ElementSimilarityBlueprint::visitDumpFeatures(const fef::IIndexEnvironment& env,
                                                    fef::IDumpFeatureVisitor&     visitor) const {

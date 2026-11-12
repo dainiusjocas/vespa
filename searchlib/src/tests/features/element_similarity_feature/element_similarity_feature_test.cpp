@@ -18,8 +18,8 @@ using namespace search::fef;
 using namespace search::fef::test;
 using namespace search::features;
 using CollectionType = FieldInfo::CollectionType;
-using vespalib::eval::TensorSpec;
 using vespalib::eval::spec_from_value;
+using vespalib::eval::TensorSpec;
 
 const std::string DEFAULT = "elementSimilarity(foo)";
 const std::string PROXIMITY = "elementSimilarity(foo).proximity";
@@ -111,8 +111,9 @@ struct ElementwiseRankFixture : BlueprintFactoryFixture {
         EXPECT_EQ(0u, stale.cells().size());
         return spec_from_value(ft.resolveObjectFeature(1));
     }
-    TensorSpec get_tensor(const std::string& query, const FtIndex& index, const IndexFixture& idx_env = IndexFixture(),
-                          const std::string& feature = "elementwise(elementSimilarity(foo),x,double)") {
+    TensorSpec get_tensor(const std::string& query, const FtIndex& index,
+                          const IndexFixture& idx_env = IndexFixture(),
+                          const std::string&  feature = "elementwise(elementSimilarity(foo),x,double)") {
         return get_tensor(FtUtil::toQuery(query), index, idx_env, feature);
     }
 };
@@ -442,7 +443,7 @@ TEST(ElementSimilarityFeatureTest, require_that_element_demultiplexing_works) {
 }
 
 TensorSpec make_tensor(const std::vector<std::pair<uint32_t, double>>& cells,
-                       const std::string&                            type = "tensor(x{})") {
+                       const std::string&                              type = "tensor(x{})") {
     TensorSpec spec(type);
     for (const auto& cell : cells) {
         spec.add({{"x", std::to_string(cell.first)}}, cell.second);
@@ -472,12 +473,10 @@ TEST(ElementwiseElementSimilarityFeatureTest, require_that_array_field_is_suppor
 TEST(ElementwiseElementSimilarityFeatureTest, require_that_each_matching_element_gets_its_own_default_score) {
     ElementwiseRankFixture f1;
     double score0 = mix(comb({prox(1), prox(3), prox(2)}), comb({1.0, 0.0, 1.0}), 4.0 / 5.0, 4.0 / 7.0);
-    EXPECT_EQ(make_tensor({{0, score0}, {2, 2.0}, {3, 3.0 * mix(prox(2), 1.0, 1.0 / 5.0, 1.0 / 2.0)}}),
-              f1.get_tensor("a b c d e", indexFoo()
-                                             .element("a c x x b x d")
-                                             .element("x y")
-                                             .element("a b c d e", 2)
-                                             .element("e x", 3)));
+    EXPECT_EQ(
+        make_tensor({{0, score0}, {2, 2.0}, {3, 3.0 * mix(prox(2), 1.0, 1.0 / 5.0, 1.0 / 2.0)}}),
+        f1.get_tensor("a b c d e",
+                      indexFoo().element("a c x x b x d").element("x y").element("a b c d e", 2).element("e x", 3)));
 }
 
 TEST(ElementwiseElementSimilarityFeatureTest, require_that_max_over_elements_matches_element_similarity_feature) {

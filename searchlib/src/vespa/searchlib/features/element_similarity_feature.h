@@ -3,7 +3,6 @@
 #pragma once
 
 #include <vespa/searchlib/fef/blueprint.h>
-#include <vespa/vespalib/util/priority_queue.h>
 
 namespace search::features {
 
@@ -20,6 +19,8 @@ private:
 public:
     ElementSimilarityBlueprint();
     ~ElementSimilarityBlueprint();
+    // Whether the given name is an aggregator that can wrap a per-element expression, e.g. 'max'
+    static bool is_known_aggregator(const std::string& name);
     void visitDumpFeatures(const fef::IIndexEnvironment& env, fef::IDumpFeatureVisitor& visitor) const override;
     fef::Blueprint::UP createInstance() const override { return Blueprint::UP(new ElementSimilarityBlueprint()); }
     fef::ParameterDescriptions getDescriptions() const override {

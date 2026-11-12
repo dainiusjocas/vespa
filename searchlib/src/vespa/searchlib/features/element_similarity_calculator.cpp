@@ -18,8 +18,12 @@ const std::string& ElementSimilarityCalculator::default_output_expression() {
     return expression;
 }
 
-ElementSimilarityCalculator::QueryTerms ElementSimilarityCalculator::collect_query_terms(
-    const fef::IQueryEnvironment& env, uint32_t field_id) {
+ElementSimilarityCalculator::QueryTerms::QueryTerms() = default;
+ElementSimilarityCalculator::QueryTerms::QueryTerms(QueryTerms&&) noexcept = default;
+ElementSimilarityCalculator::QueryTerms::~QueryTerms() = default;
+
+ElementSimilarityCalculator::QueryTerms
+ElementSimilarityCalculator::collect_query_terms(const fef::IQueryEnvironment& env, uint32_t field_id) {
     QueryTerms terms;
     for (uint32_t i = 0; i < env.getNumTerms(); ++i) {
         const fef::ITermData* termData = env.getTerm(i);
